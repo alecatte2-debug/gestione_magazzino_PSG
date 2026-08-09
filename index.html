@@ -715,20 +715,25 @@ function stockHintHtml(productId) {
 function computeOpenLoans() {
   var db = state.db;
   var groups = {}; // destination -> { destination, warehouseId, items: { productId: {name, sku, outQty, inQty} } }
+
+  // Prima passata: tutte le uscite (prestiti/prelievi), indipendentemente dall'ordine cronologico
   db.movements.forEach(function (m) {
-    if (!m.destination) return;
-    if (m.type === 'scarico') {
-      var g = groups[m.destination];
-      if (!g) g = groups[m.destination] = { destination: m.destination, warehouseId: m.from, items: {} };
-      var it = g.items[m.productId] || (g.items[m.productId] = { productId: m.productId, name: m.productName, sku: m.productSku, outQty: 0, inQty: 0 });
-      it.outQty += m.qty;
-    } else if (m.type === 'carico') {
-      var g2 = groups[m.destination];
-      if (g2 && g2.warehouseId === m.to && g2.items[m.productId]) {
-        g2.items[m.productId].inQty += m.qty;
-      }
+    if (!m.destination || m.type !== 'scarico') return;
+    var g = groups[m.destination];
+    if (!g) g = groups[m.destination] = { destination: m.destination, warehouseId: m.from, items: {} };
+    var it = g.items[m.productId] || (g.items[m.productId] = { productId: m.productId, name: m.productName, sku: m.productSku, outQty: 0, inQty: 0 });
+    it.outQty += m.qty;
+  });
+
+  // Seconda passata: tutti i resi (carico) che corrispondono a una destinazione conosciuta
+  db.movements.forEach(function (m) {
+    if (!m.destination || m.type !== 'carico') return;
+    var g = groups[m.destination];
+    if (g && g.warehouseId === m.to && g.items[m.productId]) {
+      g.items[m.productId].inQty += m.qty;
     }
   });
+
   var result = [];
   Object.keys(groups).forEach(function (destination) {
     var g = groups[destination];
