@@ -164,8 +164,8 @@ function fmtDate(ts) {
 function fmtEuro(n) { return '€ ' + Number(n || 0).toLocaleString('it-IT', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
 
 var MOVE_TYPES = {
-  carico: { label: 'Carico', cls: 'stamp-in' },
-  scarico: { label: 'Scarico', cls: 'stamp-out' },
+  carico: { label: 'Reso', cls: 'stamp-in' },
+  scarico: { label: 'Prestito / prelievo', cls: 'stamp-out' },
   trasferimento: { label: 'Trasferimento', cls: 'stamp-mid' },
 };
 
@@ -214,7 +214,7 @@ var state = {
   historyFilterWarehouse: 'tutti',
   editingProduct: null,   // null | 'new' | product object
   confirmDeleteProduct: null,
-  returningLoan: null,    // null | { note, warehouseId, items: [{productId,name,sku,qty}] }
+  returningLoan: null,    // null | { destination, warehouseId, items: [{productId,name,sku,qty}] }
   loginError: '',
   loginBusy: false,
 };
@@ -247,7 +247,7 @@ function loadAll() {
       return {
         id: m.id, ts: new Date(m.ts).getTime(), type: m.type, user: m.user_email,
         productId: m.product_id, productName: m.product_name, productSku: m.product_sku,
-        from: m.from_warehouse, to: m.to_warehouse, qty: Number(m.qty), note: m.note,
+        from: m.from_warehouse, to: m.to_warehouse, qty: Number(m.qty), note: m.note, destination: m.destination,
       };
     });
     state.db = { warehouses: wh.data, products: products, inventory: inventory, movements: movements };
@@ -269,19 +269,19 @@ function showToast(msg, kind) {
 /* ------------------------------------------------------------------
    AZIONI SUL DATABASE
 ------------------------------------------------------------------- */
-function applyCarico(productId, warehouseId, qty, note) {
+function applyCarico(productId, warehouseId, qty, note, destination) {
   var product = state.db.products.find(function (p) { return p.id === productId; });
   var current = (state.db.inventory[productId] || {})[warehouseId] || 0;
   return sb.from('inventory').upsert({ product_id: productId, warehouse_id: warehouseId, qty: current + qty })
     .then(function (r) { if (r.error) throw r.error;
       return sb.from('movements').insert({
         id: uid(), type: 'carico', user_email: state.user.email, product_id: productId,
-        product_name: product.name, product_sku: product.sku, from_warehouse: null, to_warehouse: warehouseId, qty: qty, note: note,
+        product_name: product.name, product_sku: product.sku, from_warehouse: null, to_warehouse: warehouseId, qty: qty, note: note, destination: destination || null,
       });
     }).then(function (r) { if (r.error) throw r.error; });
 }
 
-function applyScarico(productId, warehouseId, qty, note) {
+function applyScarico(productId, warehouseId, qty, note, destination) {
   var product = state.db.products.find(function (p) { return p.id === productId; });
   var current = (state.db.inventory[productId] || {})[warehouseId] || 0;
   if (qty > current) return Promise.reject(new Error(product.name + ': giacenza insufficiente (disponibili ' + current + ')'));
@@ -289,12 +289,12 @@ function applyScarico(productId, warehouseId, qty, note) {
     .then(function (r) { if (r.error) throw r.error;
       return sb.from('movements').insert({
         id: uid(), type: 'scarico', user_email: state.user.email, product_id: productId,
-        product_name: product.name, product_sku: product.sku, from_warehouse: warehouseId, to_warehouse: null, qty: qty, note: note,
+        product_name: product.name, product_sku: product.sku, from_warehouse: warehouseId, to_warehouse: null, qty: qty, note: note, destination: destination || null,
       });
     }).then(function (r) { if (r.error) throw r.error; });
 }
 
-function applyTrasferimento(productId, fromId, toId, qty, note) {
+function applyTrasferimento(productId, fromId, toId, qty, note, destination) {
   if (fromId === toId) return Promise.reject(new Error('Seleziona due magazzini diversi'));
   var product = state.db.products.find(function (p) { return p.id === productId; });
   var current = (state.db.inventory[productId] || {})[fromId] || 0;
@@ -306,7 +306,7 @@ function applyTrasferimento(productId, fromId, toId, qty, note) {
   ]).then(function (r) { if (r.error) throw r.error;
     return sb.from('movements').insert({
       id: uid(), type: 'trasferimento', user_email: state.user.email, product_id: productId,
-      product_name: product.name, product_sku: product.sku, from_warehouse: fromId, to_warehouse: toId, qty: qty, note: note,
+      product_name: product.name, product_sku: product.sku, from_warehouse: fromId, to_warehouse: toId, qty: qty, note: note, destination: destination || null,
     });
   }).then(function (r) { if (r.error) throw r.error; });
 }
@@ -337,15 +337,15 @@ function doTrasferimento(productId, fromId, toId, qty, note) {
     .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del trasferimento.', 'error'); });
 }
 
-function submitMovementBatch(lines, type, endpoints, note) {
+function submitMovementBatch(lines, type, endpoints, note, destination) {
   var errors = [];
   var chain = Promise.resolve();
   lines.forEach(function (line) {
     chain = chain.then(function () {
       var p;
-      if (type === 'carico') p = applyCarico(line.productId, endpoints.warehouseId, line.qty, note);
-      else if (type === 'scarico') p = applyScarico(line.productId, endpoints.warehouseId, line.qty, note);
-      else p = applyTrasferimento(line.productId, endpoints.fromId, endpoints.toId, line.qty, note);
+      if (type === 'carico') p = applyCarico(line.productId, endpoints.warehouseId, line.qty, note, destination);
+      else if (type === 'scarico') p = applyScarico(line.productId, endpoints.warehouseId, line.qty, note, destination);
+      else p = applyTrasferimento(line.productId, endpoints.fromId, endpoints.toId, line.qty, note, destination);
       return p.catch(function (e) { errors.push(e.message || String(e)); });
     });
   });
@@ -633,11 +633,11 @@ function viewMovement() {
   var products = db.products;
   var firstProduct = products[0];
   var tabs = [
-    { id: 'carico', label: 'Carico', icon: 'packagePlus' },
-    { id: 'scarico', label: 'Scarico', icon: 'packageMinus' },
-    { id: 'trasferimento', label: 'Trasferimento', icon: 'swap' },
+    { id: 'carico', icon: 'packagePlus' },
+    { id: 'scarico', icon: 'packageMinus' },
+    { id: 'trasferimento', icon: 'swap' },
   ].map(function (t) {
-    return '<button type="button" class="wh-type-tab ' + (type === t.id ? 'active' : '') + '" data-move-type="' + t.id + '">' + icon(t.icon, 16) + ' ' + t.label + '</button>';
+    return '<button type="button" class="wh-type-tab ' + (type === t.id ? 'active' : '') + '" data-move-type="' + t.id + '">' + icon(t.icon, 16) + ' ' + MOVE_TYPES[t.id].label + '</button>';
   }).join('');
 
   var productOptions = products.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + '</option>'; }).join('');
@@ -653,9 +653,14 @@ function viewMovement() {
       '<label class="wh-field"><span>A</span><select id="mv-to">' + toOptions + '</select></label>';
   }
 
+  var noteFieldHtml = type === 'scarico'
+    ? '<label class="wh-field wh-field-wide"><span>Destinazione (obbligatoria)</span><input id="mv-destination" placeholder="es. evento del 15/08, nome cliente/evento…" /></label>' +
+      '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. dettagli aggiuntivi…" /></label>'
+    : '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. bolla n. 445, fornitore…" /></label>';
+
   return (
     '<div class="wh-view">' +
-    viewHeader('Operazione', 'Registra un movimento', "Carico e scarico aggiornano la giacenza di un magazzino; il trasferimento sposta merce tra i due. Aggiungi più articoli alla lista per registrarli tutti insieme (es. materiale per lo stesso evento).") +
+    viewHeader('Operazione', 'Registra un movimento', "Prestito/prelievo e reso aggiornano la giacenza di un magazzino; il trasferimento sposta merce tra i due. Aggiungi più articoli alla lista per registrarli tutti insieme (es. materiale per lo stesso evento).") +
     '<div class="wh-type-tabs">' + tabs + '</div>' +
     '<div class="wh-movement-card">' +
     '<p class="wh-eyebrow" style="margin-bottom:10px;">Magazzino / destinazione (comune a tutta la lista)</p>' +
@@ -673,7 +678,7 @@ function viewMovement() {
     '<div id="mv-cart-wrap">' + cartLinesHtml() + '</div>' +
 
     '<div class="wh-form-grid" style="margin-top:18px;">' +
-    '<label class="wh-field wh-field-wide"><span>Nota (opzionale, comune a tutta la lista)</span><input id="mv-note" placeholder="es. evento del 15/08, bolla n. 445…" /></label>' +
+    noteFieldHtml +
     '</div>' +
 
     '<button type="button" id="mv-submit" class="wh-btn wh-btn-primary wh-submit-move ' + MOVE_TYPES[type].cls + '" style="margin-top:16px;">' + icon('chevronRight', 16) + ' Conferma ' + MOVE_TYPES[type].label.toLowerCase() + '</button>' +
@@ -695,28 +700,28 @@ function stockHintHtml(productId) {
 ------------------------------------------------------------------- */
 function computeOpenLoans() {
   var db = state.db;
-  var groups = {}; // note -> { note, warehouseId, items: { productId: {name, sku, outQty, inQty} } }
+  var groups = {}; // destination -> { destination, warehouseId, items: { productId: {name, sku, outQty, inQty} } }
   db.movements.forEach(function (m) {
-    if (!m.note) return;
+    if (!m.destination) return;
     if (m.type === 'scarico') {
-      var g = groups[m.note];
-      if (!g) g = groups[m.note] = { note: m.note, warehouseId: m.from, items: {} };
+      var g = groups[m.destination];
+      if (!g) g = groups[m.destination] = { destination: m.destination, warehouseId: m.from, items: {} };
       var it = g.items[m.productId] || (g.items[m.productId] = { productId: m.productId, name: m.productName, sku: m.productSku, outQty: 0, inQty: 0 });
       it.outQty += m.qty;
     } else if (m.type === 'carico') {
-      var g2 = groups[m.note];
+      var g2 = groups[m.destination];
       if (g2 && g2.warehouseId === m.to && g2.items[m.productId]) {
         g2.items[m.productId].inQty += m.qty;
       }
     }
   });
   var result = [];
-  Object.keys(groups).forEach(function (note) {
-    var g = groups[note];
+  Object.keys(groups).forEach(function (destination) {
+    var g = groups[destination];
     var items = Object.keys(g.items).map(function (pid) { return g.items[pid]; })
       .map(function (it) { return { productId: it.productId, name: it.name, sku: it.sku, outstanding: it.outQty - it.inQty }; })
       .filter(function (it) { return it.outstanding > 0; });
-    if (items.length) result.push({ note: g.note, warehouseId: g.warehouseId, items: items });
+    if (items.length) result.push({ destination: g.destination, warehouseId: g.warehouseId, items: items });
   });
   return result;
 }
@@ -737,15 +742,15 @@ function openLoansHtml() {
     return (
       '<div class="wh-summary-card" style="margin-bottom:10px;">' +
       '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">' +
-      '<div><p class="wh-eyebrow">' + esc(whName(loan.warehouseId)) + '</p><p class="wh-strong" style="margin:2px 0 8px;">' + esc(loan.note) + '</p>' +
+      '<div><p class="wh-eyebrow">' + esc(whName(loan.warehouseId)) + '</p><p class="wh-strong" style="margin:2px 0 8px;">' + esc(loan.destination) + '</p>' +
       '<ul style="margin:0; padding-left:18px; font-size:13px; color:var(--steel);">' + itemsList + '</ul></div>' +
-      '<button type="button" class="wh-btn wh-btn-primary wh-submit-move stamp-in" data-return-loan="' + esc(loan.note) + '">' + icon('packagePlus', 16) + ' Registra reso</button>' +
+      '<button type="button" class="wh-btn wh-btn-primary wh-submit-move stamp-in" data-return-loan="' + esc(loan.destination) + '">' + icon('packagePlus', 16) + ' Registra reso</button>' +
       '</div></div>'
     );
   }).join('');
   return (
     '<div class="wh-view" style="margin-bottom:26px;">' +
-    viewHeader('In corso', 'Prestiti aperti', 'Uscite non ancora rientrate, raggruppate per nota. Il reso torna automaticamente nel magazzino di origine.') +
+    viewHeader('In corso', 'Prestiti aperti', 'Uscite non ancora rientrate, raggruppate per destinazione. Il reso torna automaticamente nel magazzino di origine.') +
     cards +
     '</div>'
   );
@@ -762,8 +767,9 @@ function returnModalHtml() {
   return (
     '<div class="wh-modal-overlay" id="return-modal-overlay"><div class="wh-modal">' +
     '<div class="wh-modal-head"><h2 class="wh-display-sm">Registra reso</h2><button class="wh-icon-btn" id="return-close">' + icon('x', 16) + '</button></div>' +
-    '<p class="wh-modal-msg">Causale: <span class="wh-strong">' + esc(loan.note) + '</span>. Puoi correggere le quantità (es. reso parziale) prima di confermare.</p>' +
+    '<p class="wh-modal-msg">Destinazione: <span class="wh-strong">' + esc(loan.destination) + '</span>. Puoi correggere le quantità (es. reso parziale) prima di confermare.</p>' +
     '<div class="wh-table-wrap" style="margin-bottom:16px;"><table class="wh-table"><tbody>' + rows + '</tbody></table></div>' +
+    '<label class="wh-field" style="margin-bottom:16px;"><span>Nota — stato degli articoli (opzionale)</span><input id="return-note" placeholder="es. 2 panche danneggiate, tutto integro…" /></label>' +
     '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="return-cancel">Annulla</button>' +
     '<button type="button" class="wh-btn wh-btn-primary" id="return-confirm">' + icon('check', 16) + ' Conferma reso</button></div>' +
     '</div></div>'
@@ -786,15 +792,16 @@ function viewHistory() {
       '<td><div class="wh-strong">' + esc(m.productName) + '</div><div class="wh-mono wh-dim">' + esc(m.productSku) + '</div></td>' +
       '<td>' + (m.from ? esc(whName(m.from)) : '—') + ' → ' + (m.to ? esc(whName(m.to)) : '—') + '</td>' +
       '<td class="wh-num wh-strong">' + m.qty + '</td>' +
+      '<td>' + esc(m.destination || '—') + '</td>' +
       '<td class="wh-dim">' + esc(m.note || '—') + '</td>' +
       '<td>' + esc(m.user) + '</td>' +
       '<td class="wh-dim">' + fmtDate(m.ts) + '</td></tr>'
     );
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="7" class="wh-empty">Nessun movimento registrato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="8" class="wh-empty">Nessun movimento registrato.</td></tr>';
 
   var typeOptions = ['tutti', 'carico', 'scarico', 'trasferimento'].map(function (t) {
-    var label = t === 'tutti' ? 'Tutti i tipi' : (t === 'carico' ? 'Solo carichi' : (t === 'scarico' ? 'Solo scarichi' : 'Solo trasferimenti'));
+    var label = t === 'tutti' ? 'Tutti i tipi' : (t === 'carico' ? 'Solo resi' : (t === 'scarico' ? 'Solo prestiti/prelievi' : 'Solo trasferimenti'));
     return '<option value="' + t + '" ' + (state.historyFilterType === t ? 'selected' : '') + '>' + label + '</option>';
   }).join('');
   var whOptions = '<option value="tutti" ' + (state.historyFilterWarehouse === 'tutti' ? 'selected' : '') + '>Tutti i magazzini</option>' +
@@ -806,7 +813,7 @@ function viewHistory() {
     '<div class="wh-view">' +
     viewHeader('Registro', 'Storico movimenti', 'Tutte le operazioni registrate, con utente e data.') +
     '<div class="wh-filters"><select id="hist-filter-type">' + typeOptions + '</select><select id="hist-filter-wh">' + whOptions + '</select></div>' +
-    '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Tipo</th><th>Prodotto</th><th>Da → A</th><th class="wh-num">Quantità</th><th>Nota</th><th>Utente</th><th>Data</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Tipo</th><th>Prodotto</th><th>Da → A</th><th class="wh-num">Quantità</th><th>Destinazione</th><th>Nota</th><th>Utente</th><th>Data</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
     '</div>' +
     returnModalHtml() +
     '</div>'
@@ -1004,6 +1011,11 @@ function attachMovementHandlers() {
     if (type !== 'trasferimento') endpoints.warehouseId = document.getElementById('mv-warehouse').value;
     else { endpoints.fromId = document.getElementById('mv-from').value; endpoints.toId = document.getElementById('mv-to').value; }
     var note = document.getElementById('mv-note').value.trim();
+    var destination = '';
+    if (type === 'scarico') {
+      destination = document.getElementById('mv-destination').value.trim();
+      if (!destination) { showToast('La destinazione è obbligatoria per i prestiti/prelievi', 'error'); return; }
+    }
 
     var lines = state.movementCart.slice();
     // Se la lista è vuota, usa i campi correnti come unica riga
@@ -1015,7 +1027,7 @@ function attachMovementHandlers() {
     }
 
     submitBtn.disabled = true;
-    submitMovementBatch(lines, type, endpoints, note).then(function () {
+    submitMovementBatch(lines, type, endpoints, note, destination).then(function () {
       state.movementCart = [];
       submitBtn.disabled = false;
       render();
@@ -1042,11 +1054,11 @@ function attachHistoryHandlers() {
 
   document.querySelectorAll('[data-return-loan]').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      var note = btn.getAttribute('data-return-loan');
-      var loan = computeOpenLoans().find(function (l) { return l.note === note; });
+      var destination = btn.getAttribute('data-return-loan');
+      var loan = computeOpenLoans().find(function (l) { return l.destination === destination; });
       if (!loan) return;
       state.returningLoan = {
-        note: loan.note,
+        destination: loan.destination,
         warehouseId: loan.warehouseId,
         items: loan.items.map(function (it) { return { productId: it.productId, name: it.name, qty: it.outstanding }; }),
       };
@@ -1080,10 +1092,11 @@ function attachReturnModalHandlers() {
   var confirmBtn = document.getElementById('return-confirm');
   if (confirmBtn) confirmBtn.addEventListener('click', function () {
     var loan = state.returningLoan;
+    var conditionNote = document.getElementById('return-note').value.trim();
     var lines = loan.items.filter(function (it) { return it.qty > 0; }).map(function (it) { return { productId: it.productId, qty: it.qty }; });
     if (!lines.length) { showToast('Inserisci almeno una quantità da restituire', 'error'); return; }
     confirmBtn.disabled = true;
-    submitMovementBatch(lines, 'carico', { warehouseId: loan.warehouseId }, loan.note).then(function () {
+    submitMovementBatch(lines, 'carico', { warehouseId: loan.warehouseId }, conditionNote, loan.destination).then(function () {
       state.returningLoan = null;
       render();
     });
