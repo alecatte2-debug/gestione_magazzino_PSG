@@ -627,11 +627,23 @@ function cartLinesHtml() {
   return '<table class="wh-table"><tbody>' + rows + '</tbody></table>';
 }
 
+function productOptionsHtml(type, warehouseId) {
+  var db = state.db;
+  var list = db.products;
+  if (type !== 'carico' && warehouseId) {
+    list = list.filter(function (p) { return ((db.inventory[p.id] || {})[warehouseId] || 0) > 0; });
+  }
+  if (!list.length) return '<option value="">— Nessun prodotto disponibile in questo magazzino —</option>';
+  return list.map(function (p) {
+    var qty = (db.inventory[p.id] || {})[warehouseId] || 0;
+    var suffix = type !== 'carico' ? ' (disponibili: ' + qty + ')' : '';
+    return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + suffix + '</option>';
+  }).join('');
+}
+
 function viewMovement() {
   var db = state.db;
   var type = state.movementType;
-  var products = db.products;
-  var firstProduct = products[0];
   var tabs = [
     { id: 'carico', icon: 'packagePlus' },
     { id: 'scarico', icon: 'packageMinus' },
@@ -640,8 +652,8 @@ function viewMovement() {
     return '<button type="button" class="wh-type-tab ' + (type === t.id ? 'active' : '') + '" data-move-type="' + t.id + '">' + icon(t.icon, 16) + ' ' + MOVE_TYPES[t.id].label + '</button>';
   }).join('');
 
-  var productOptions = products.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + '</option>'; }).join('');
   var warehouseOptions = db.warehouses.map(function (w) { return '<option value="' + esc(w.id) + '">' + esc(w.name) + '</option>'; }).join('');
+  var referenceWarehouseId = db.warehouses[0] ? db.warehouses[0].id : null;
 
   var fieldsHtml;
   if (type !== 'trasferimento') {
@@ -658,6 +670,8 @@ function viewMovement() {
       '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. dettagli aggiuntivi…" /></label>'
     : '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. bolla n. 445, fornitore…" /></label>';
 
+  var productSelectHtml = '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptionsHtml(type, referenceWarehouseId) + '</select></label>';
+
   return (
     '<div class="wh-view">' +
     viewHeader('Operazione', 'Registra un movimento', "Prestito/prelievo e reso aggiornano la giacenza di un magazzino; il trasferimento sposta merce tra i due. Aggiungi più articoli alla lista per registrarli tutti insieme (es. materiale per lo stesso evento).") +
@@ -668,11 +682,11 @@ function viewMovement() {
 
     '<p class="wh-eyebrow" style="margin-bottom:10px;">Aggiungi articolo</p>' +
     '<div class="wh-form-grid">' +
-    '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptions + '</select></label>' +
+    '<div id="mv-product-wrap" style="grid-column:1/-1;">' + productSelectHtml + '</div>' +
     '<label class="wh-field"><span>Quantità</span><input id="mv-qty" type="number" min="1" placeholder="0" /></label>' +
     '<div style="align-self:end;"><button type="button" id="mv-add-line" class="wh-btn wh-btn-ghost" style="width:100%; justify-content:center;">' + icon('plus', 16) + ' Aggiungi alla lista</button></div>' +
     '</div>' +
-    '<div class="wh-stock-hint" id="mv-stock-hint">' + (firstProduct ? stockHintHtml(firstProduct.id) : '') + '</div>' +
+    '<div class="wh-stock-hint" id="mv-stock-hint"></div>' +
 
     '<p class="wh-eyebrow" style="margin:20px 0 10px;">Lista articoli da registrare</p>' +
     '<div id="mv-cart-wrap">' + cartLinesHtml() + '</div>' +
@@ -979,19 +993,51 @@ function attachMovementHandlers() {
       render();
     });
   });
-  var productSel = document.getElementById('mv-product');
+
+  var type = state.movementType;
+
+  function currentReferenceWarehouseId() {
+    if (type === 'trasferimento') {
+      var fromSel = document.getElementById('mv-from');
+      return fromSel ? fromSel.value : null;
+    }
+    var whSel = document.getElementById('mv-warehouse');
+    return whSel ? whSel.value : null;
+  }
+
+  function refreshProductOptions() {
+    var wrap = document.getElementById('mv-product-wrap');
+    var whId = currentReferenceWarehouseId();
+    if (wrap) {
+      wrap.innerHTML = '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptionsHtml(type, whId) + '</select></label>';
+      var newSel = document.getElementById('mv-product');
+      if (newSel) newSel.addEventListener('change', refreshHint);
+    }
+    refreshHint();
+  }
+
   function refreshHint() {
     var hintEl = document.getElementById('mv-stock-hint');
-    if (hintEl && productSel) hintEl.innerHTML = stockHintHtml(productSel.value);
+    var sel = document.getElementById('mv-product');
+    if (hintEl && sel && sel.value) hintEl.innerHTML = stockHintHtml(sel.value);
+    else if (hintEl) hintEl.innerHTML = '';
   }
+
+  var productSel = document.getElementById('mv-product');
   if (productSel) productSel.addEventListener('change', refreshHint);
+  refreshHint(); // popola il suggerimento al primo caricamento
+
+  var whSelector = document.getElementById('mv-warehouse');
+  if (whSelector) whSelector.addEventListener('change', refreshProductOptions);
+  var fromSelector = document.getElementById('mv-from');
+  if (fromSelector) fromSelector.addEventListener('change', refreshProductOptions);
 
   var addBtn = document.getElementById('mv-add-line');
   if (addBtn) addBtn.addEventListener('click', function () {
     var productId = document.getElementById('mv-product').value;
     var qtyInput = document.getElementById('mv-qty');
     var qty = Number(qtyInput.value);
-    if (!productId || !qty || qty <= 0) { showToast('Inserisci una quantità valida', 'error'); return; }
+    if (!productId || !qty || qty <= 0) { showToast('Seleziona un prodotto e inserisci una quantità valida', 'error'); return; }
     var product = state.db.products.find(function (p) { return p.id === productId; });
     var existing = state.movementCart.find(function (l) { return l.productId === productId; });
     if (existing) existing.qty += qty;
