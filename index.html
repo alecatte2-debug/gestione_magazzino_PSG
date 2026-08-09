@@ -214,6 +214,7 @@ var state = {
   historyFilterWarehouse: 'tutti',
   editingProduct: null,   // null | 'new' | product object
   confirmDeleteProduct: null,
+  returningLoan: null,    // null | { note, warehouseId, items: [{productId,name,sku,qty}] }
   loginError: '',
   loginBusy: false,
 };
@@ -690,8 +691,85 @@ function stockHintHtml(productId) {
 }
 
 /* ------------------------------------------------------------------
+   PRESTITI APERTI (raggruppati per nota/causale)
+------------------------------------------------------------------- */
+function computeOpenLoans() {
+  var db = state.db;
+  var groups = {}; // note -> { note, warehouseId, items: { productId: {name, sku, outQty, inQty} } }
+  db.movements.forEach(function (m) {
+    if (!m.note) return;
+    if (m.type === 'scarico') {
+      var g = groups[m.note];
+      if (!g) g = groups[m.note] = { note: m.note, warehouseId: m.from, items: {} };
+      var it = g.items[m.productId] || (g.items[m.productId] = { productId: m.productId, name: m.productName, sku: m.productSku, outQty: 0, inQty: 0 });
+      it.outQty += m.qty;
+    } else if (m.type === 'carico') {
+      var g2 = groups[m.note];
+      if (g2 && g2.warehouseId === m.to && g2.items[m.productId]) {
+        g2.items[m.productId].inQty += m.qty;
+      }
+    }
+  });
+  var result = [];
+  Object.keys(groups).forEach(function (note) {
+    var g = groups[note];
+    var items = Object.keys(g.items).map(function (pid) { return g.items[pid]; })
+      .map(function (it) { return { productId: it.productId, name: it.name, sku: it.sku, outstanding: it.outQty - it.inQty }; })
+      .filter(function (it) { return it.outstanding > 0; });
+    if (items.length) result.push({ note: g.note, warehouseId: g.warehouseId, items: items });
+  });
+  return result;
+}
+
+/* ------------------------------------------------------------------
    TEMPLATE: STORICO
 ------------------------------------------------------------------- */
+
+function openLoansHtml() {
+  var db = state.db;
+  var loans = computeOpenLoans();
+  if (!loans.length) return '';
+  function whName(id) { var w = db.warehouses.find(function (w) { return w.id === id; }); return w ? w.name : '—'; }
+  var cards = loans.map(function (loan) {
+    var itemsList = loan.items.map(function (it) {
+      return '<li>' + esc(it.name) + ' — <span class="wh-strong">' + it.outstanding + '</span> fuori</li>';
+    }).join('');
+    return (
+      '<div class="wh-summary-card" style="margin-bottom:10px;">' +
+      '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">' +
+      '<div><p class="wh-eyebrow">' + esc(whName(loan.warehouseId)) + '</p><p class="wh-strong" style="margin:2px 0 8px;">' + esc(loan.note) + '</p>' +
+      '<ul style="margin:0; padding-left:18px; font-size:13px; color:var(--steel);">' + itemsList + '</ul></div>' +
+      '<button type="button" class="wh-btn wh-btn-primary wh-submit-move stamp-in" data-return-loan="' + esc(loan.note) + '">' + icon('packagePlus', 16) + ' Registra reso</button>' +
+      '</div></div>'
+    );
+  }).join('');
+  return (
+    '<div class="wh-view" style="margin-bottom:26px;">' +
+    viewHeader('In corso', 'Prestiti aperti', 'Uscite non ancora rientrate, raggruppate per nota. Il reso torna automaticamente nel magazzino di origine.') +
+    cards +
+    '</div>'
+  );
+}
+
+function returnModalHtml() {
+  var loan = state.returningLoan;
+  if (!loan) return '';
+  var rows = loan.items.map(function (it, i) {
+    return '<tr><td class="wh-strong">' + esc(it.name) + '</td>' +
+      '<td class="wh-num"><input class="wh-mono" data-return-qty="' + i + '" type="number" min="0" value="' + it.qty + '" style="width:80px; padding:6px 8px; border:1px solid var(--line); border-radius:3px; text-align:right;" /></td>' +
+      '<td class="wh-row-actions"><button class="wh-icon-btn wh-icon-danger" data-remove-return-line="' + i + '">' + icon('x', 14) + '</button></td></tr>';
+  }).join('');
+  return (
+    '<div class="wh-modal-overlay" id="return-modal-overlay"><div class="wh-modal">' +
+    '<div class="wh-modal-head"><h2 class="wh-display-sm">Registra reso</h2><button class="wh-icon-btn" id="return-close">' + icon('x', 16) + '</button></div>' +
+    '<p class="wh-modal-msg">Causale: <span class="wh-strong">' + esc(loan.note) + '</span>. Puoi correggere le quantità (es. reso parziale) prima di confermare.</p>' +
+    '<div class="wh-table-wrap" style="margin-bottom:16px;"><table class="wh-table"><tbody>' + rows + '</tbody></table></div>' +
+    '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="return-cancel">Annulla</button>' +
+    '<button type="button" class="wh-btn wh-btn-primary" id="return-confirm">' + icon('check', 16) + ' Conferma reso</button></div>' +
+    '</div></div>'
+  );
+}
+
 function viewHistory() {
   var db = state.db;
   var rows = db.movements.filter(function (m) {
@@ -723,10 +801,14 @@ function viewHistory() {
     db.warehouses.map(function (w) { return '<option value="' + esc(w.id) + '" ' + (state.historyFilterWarehouse === w.id ? 'selected' : '') + '>' + esc(w.name) + '</option>'; }).join('');
 
   return (
+    '<div>' +
+    openLoansHtml() +
     '<div class="wh-view">' +
     viewHeader('Registro', 'Storico movimenti', 'Tutte le operazioni registrate, con utente e data.') +
     '<div class="wh-filters"><select id="hist-filter-type">' + typeOptions + '</select><select id="hist-filter-wh">' + whOptions + '</select></div>' +
     '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Tipo</th><th>Prodotto</th><th>Da → A</th><th class="wh-num">Quantità</th><th>Nota</th><th>Utente</th><th>Data</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '</div>' +
+    returnModalHtml() +
     '</div>'
   );
 }
@@ -957,6 +1039,55 @@ function attachHistoryHandlers() {
   var whSel = document.getElementById('hist-filter-wh');
   if (typeSel) typeSel.addEventListener('change', function () { state.historyFilterType = typeSel.value; render(); });
   if (whSel) whSel.addEventListener('change', function () { state.historyFilterWarehouse = whSel.value; render(); });
+
+  document.querySelectorAll('[data-return-loan]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var note = btn.getAttribute('data-return-loan');
+      var loan = computeOpenLoans().find(function (l) { return l.note === note; });
+      if (!loan) return;
+      state.returningLoan = {
+        note: loan.note,
+        warehouseId: loan.warehouseId,
+        items: loan.items.map(function (it) { return { productId: it.productId, name: it.name, qty: it.outstanding }; }),
+      };
+      render();
+    });
+  });
+
+  if (state.returningLoan) attachReturnModalHandlers();
+}
+
+function attachReturnModalHandlers() {
+  var closeEls = [document.getElementById('return-close'), document.getElementById('return-cancel')];
+  closeEls.forEach(function (el) { if (el) el.addEventListener('click', function () { state.returningLoan = null; render(); }); });
+  var overlay = document.getElementById('return-modal-overlay');
+  if (overlay) overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) { state.returningLoan = null; render(); } });
+
+  document.querySelectorAll('[data-return-qty]').forEach(function (input) {
+    input.addEventListener('input', function () {
+      var i = Number(input.getAttribute('data-return-qty'));
+      state.returningLoan.items[i].qty = Number(input.value) || 0;
+    });
+  });
+  document.querySelectorAll('[data-remove-return-line]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var i = Number(btn.getAttribute('data-remove-return-line'));
+      state.returningLoan.items.splice(i, 1);
+      render();
+    });
+  });
+
+  var confirmBtn = document.getElementById('return-confirm');
+  if (confirmBtn) confirmBtn.addEventListener('click', function () {
+    var loan = state.returningLoan;
+    var lines = loan.items.filter(function (it) { return it.qty > 0; }).map(function (it) { return { productId: it.productId, qty: it.qty }; });
+    if (!lines.length) { showToast('Inserisci almeno una quantità da restituire', 'error'); return; }
+    confirmBtn.disabled = true;
+    submitMovementBatch(lines, 'carico', { warehouseId: loan.warehouseId }, loan.note).then(function () {
+      state.returningLoan = null;
+      render();
+    });
+  });
 }
 
 /* ------------------------------------------------------------------
