@@ -315,18 +315,17 @@ function doTrasferimento(productId, fromId, toId, qty, note) {
     .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del trasferimento.', 'error'); });
 }
 
-function upsertProduct(product) {
+function upsertProduct(product, stockOverrides) {
   var isNew = !state.db.products.some(function (p) { return p.id === product.id; });
   return sb.from('products').upsert({
     id: product.id, sku: product.sku, name: product.name, category: product.category, price: product.price, min_stock: product.minStock, total_owned: product.totalOwned,
   }).then(function (r) {
     if (r.error) throw r.error;
-    if (isNew) {
-      return sb.from('inventory').upsert([
-        { product_id: product.id, warehouse_id: 'A', qty: 0 },
-        { product_id: product.id, warehouse_id: 'B', qty: 0 },
-      ]);
-    }
+    var rows = state.db.warehouses.map(function (w) {
+      var qty = (stockOverrides && stockOverrides[w.id] !== undefined) ? stockOverrides[w.id] : 0;
+      return { product_id: product.id, warehouse_id: w.id, qty: qty };
+    });
+    return sb.from('inventory').upsert(rows);
   }).then(function () { return loadAll(); })
     .then(function () { showToast(isNew ? 'Prodotto aggiunto' : 'Prodotto aggiornato'); })
     .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del prodotto.', 'error'); });
@@ -539,6 +538,11 @@ function viewProducts() {
 
 function productModalHtml(product) {
   var p = product || { id: '', sku: '', name: '', category: '', price: '', minStock: '', totalOwned: '' };
+  var currentInv = product ? (state.db.inventory[product.id] || {}) : {};
+  var stockFields = state.db.warehouses.map(function (w) {
+    var val = currentInv[w.id] || 0;
+    return '<label class="wh-field"><span>Giacenza — ' + esc(w.name) + '</span><input class="pm-stock" data-warehouse="' + esc(w.id) + '" type="number" min="0" value="' + val + '" placeholder="0" /></label>';
+  }).join('');
   return (
     '<div class="wh-modal-overlay" id="product-modal-overlay"><div class="wh-modal">' +
     '<div class="wh-modal-head"><h2 class="wh-display-sm">' + (product ? 'Modifica prodotto' : 'Nuovo prodotto') + '</h2>' +
@@ -550,6 +554,7 @@ function productModalHtml(product) {
     '<label class="wh-field"><span>Prezzo unitario (€)</span><input id="pm-price" type="number" step="0.01" min="0" value="' + esc(p.price) + '" placeholder="0.00" /></label>' +
     '<label class="wh-field"><span>Scorta minima (avviso)</span><input id="pm-minstock" type="number" min="0" value="' + esc(p.minStock) + '" placeholder="0" /></label>' +
     '<label class="wh-field wh-field-wide"><span>Quantità totale posseduta (opzionale)</span><input id="pm-totalowned" type="number" min="0" value="' + esc(p.totalOwned) + '" placeholder="es. 20 — lascia vuoto se non applicabile" /></label>' +
+    stockFields +
     '<div id="pm-error"></div>' +
     '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="pm-cancel">Annulla</button>' +
     '<button type="button" class="wh-btn wh-btn-primary" id="pm-save" data-id="' + esc(p.id) + '">' + icon('check', 16) + ' Salva</button></div>' +
@@ -791,8 +796,12 @@ function attachProductModalHandlers() {
       return;
     }
     var id = saveBtn.getAttribute('data-id') || uid();
+    var stockOverrides = {};
+    document.querySelectorAll('.pm-stock').forEach(function (input) {
+      stockOverrides[input.getAttribute('data-warehouse')] = Number(input.value) || 0;
+    });
     state.editingProduct = null;
-    upsertProduct({ id: id, sku: sku, name: name, category: category, price: price, minStock: minStock, totalOwned: totalOwned });
+    upsertProduct({ id: id, sku: sku, name: name, category: category, price: price, minStock: minStock, totalOwned: totalOwned }, stockOverrides);
     render();
   });
 }
