@@ -239,7 +239,7 @@ function loadAll() {
       inventory[r.product_id][r.warehouse_id] = Number(r.qty);
     });
     var products = prod.data.map(function (p) {
-      return { id: p.id, sku: p.sku, name: p.name, category: p.category, price: Number(p.price), minStock: Number(p.min_stock) };
+      return { id: p.id, sku: p.sku, name: p.name, category: p.category, price: Number(p.price), minStock: Number(p.min_stock), totalOwned: Number(p.total_owned || 0) };
     });
     var movements = mov.data.map(function (m) {
       return {
@@ -318,7 +318,7 @@ function doTrasferimento(productId, fromId, toId, qty, note) {
 function upsertProduct(product) {
   var isNew = !state.db.products.some(function (p) { return p.id === product.id; });
   return sb.from('products').upsert({
-    id: product.id, sku: product.sku, name: product.name, category: product.category, price: product.price, min_stock: product.minStock,
+    id: product.id, sku: product.sku, name: product.name, category: product.category, price: product.price, min_stock: product.minStock, total_owned: product.totalOwned,
   }).then(function (r) {
     if (r.error) throw r.error;
     if (isNew) {
@@ -454,11 +454,18 @@ function dashboardTableHtml() {
       var low = qty <= (r.product.minStock || 0);
       return '<td class="wh-num"><span class="' + (low ? 'wh-qty-low' : '') + '">' + qty + '</span>' + (low ? icon('warning', 12, 'wh-low-icon') : '') + '</td>';
     }).join('');
-    return '<tr><td class="wh-strong">' + esc(r.product.name) + '</td><td class="wh-mono">' + esc(r.product.sku) + '</td><td>' + esc(r.product.category) + '</td>' + whCells + '<td class="wh-num wh-strong">' + r.total + '</td></tr>';
+    var outCell;
+    if (r.product.totalOwned > 0) {
+      var out = r.product.totalOwned - r.total;
+      outCell = '<td class="wh-num ' + (out > 0 ? 'wh-qty-low' : '') + '">' + out + ' <span class="wh-dim">/ ' + r.product.totalOwned + '</span></td>';
+    } else {
+      outCell = '<td class="wh-num wh-dim">—</td>';
+    }
+    return '<tr><td class="wh-strong">' + esc(r.product.name) + '</td><td class="wh-mono">' + esc(r.product.sku) + '</td><td>' + esc(r.product.category) + '</td>' + whCells + '<td class="wh-num wh-strong">' + r.total + '</td>' + outCell + '</tr>';
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="' + (4 + db.warehouses.length) + '" class="wh-empty">Nessun prodotto trovato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="' + (5 + db.warehouses.length) + '" class="wh-empty">Nessun prodotto trovato.</td></tr>';
   return (
-    '<table class="wh-table"><thead><tr><th>Prodotto</th><th>SKU</th><th>Categoria</th>' + whHeaders + '<th class="wh-num">Totale</th></tr></thead><tbody>' + body + '</tbody></table>'
+    '<table class="wh-table"><thead><tr><th>Prodotto</th><th>SKU</th><th>Categoria</th>' + whHeaders + '<th class="wh-num">Totale</th><th class="wh-num">Fuori</th></tr></thead><tbody>' + body + '</tbody></table>'
   );
 }
 
@@ -502,13 +509,14 @@ function productsTableHtml() {
     return (
       '<tr><td class="wh-mono">' + esc(p.sku) + '</td><td class="wh-strong">' + esc(p.name) + '</td><td>' + esc(p.category) + '</td>' +
       '<td class="wh-num">' + fmtEuro(p.price) + '</td><td class="wh-num">' + (p.minStock || 0) + '</td>' +
+      '<td class="wh-num">' + (p.totalOwned > 0 ? p.totalOwned : '—') + '</td>' +
       '<td class="wh-row-actions"><button class="wh-icon-btn" data-edit-product="' + esc(p.id) + '">' + icon('pencil', 14) + '</button>' +
       '<button class="wh-icon-btn wh-icon-danger" data-delete-product="' + esc(p.id) + '">' + icon('trash', 14) + '</button></td></tr>'
     );
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="6" class="wh-empty">Nessun prodotto trovato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="7" class="wh-empty">Nessun prodotto trovato.</td></tr>';
   return (
-    '<table class="wh-table"><thead><tr><th>SKU</th><th>Nome</th><th>Categoria</th><th class="wh-num">Prezzo</th><th class="wh-num">Scorta minima</th><th></th></tr></thead><tbody>' + body + '</tbody></table>'
+    '<table class="wh-table"><thead><tr><th>SKU</th><th>Nome</th><th>Categoria</th><th class="wh-num">Prezzo</th><th class="wh-num">Scorta minima</th><th class="wh-num">Tot. posseduto</th><th></th></tr></thead><tbody>' + body + '</tbody></table>'
   );
 }
 
@@ -530,7 +538,7 @@ function viewProducts() {
 }
 
 function productModalHtml(product) {
-  var p = product || { id: '', sku: '', name: '', category: '', price: '', minStock: '' };
+  var p = product || { id: '', sku: '', name: '', category: '', price: '', minStock: '', totalOwned: '' };
   return (
     '<div class="wh-modal-overlay" id="product-modal-overlay"><div class="wh-modal">' +
     '<div class="wh-modal-head"><h2 class="wh-display-sm">' + (product ? 'Modifica prodotto' : 'Nuovo prodotto') + '</h2>' +
@@ -541,6 +549,7 @@ function productModalHtml(product) {
     '<label class="wh-field"><span>Categoria</span><input id="pm-category" value="' + esc(p.category) + '" placeholder="es. Ferramenta" /></label>' +
     '<label class="wh-field"><span>Prezzo unitario (€)</span><input id="pm-price" type="number" step="0.01" min="0" value="' + esc(p.price) + '" placeholder="0.00" /></label>' +
     '<label class="wh-field"><span>Scorta minima (avviso)</span><input id="pm-minstock" type="number" min="0" value="' + esc(p.minStock) + '" placeholder="0" /></label>' +
+    '<label class="wh-field wh-field-wide"><span>Quantità totale posseduta (opzionale)</span><input id="pm-totalowned" type="number" min="0" value="' + esc(p.totalOwned) + '" placeholder="es. 20 — lascia vuoto se non applicabile" /></label>' +
     '<div id="pm-error"></div>' +
     '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="pm-cancel">Annulla</button>' +
     '<button type="button" class="wh-btn wh-btn-primary" id="pm-save" data-id="' + esc(p.id) + '">' + icon('check', 16) + ' Salva</button></div>' +
@@ -776,13 +785,14 @@ function attachProductModalHandlers() {
     var category = document.getElementById('pm-category').value.trim();
     var price = Number(document.getElementById('pm-price').value) || 0;
     var minStock = Number(document.getElementById('pm-minstock').value) || 0;
+    var totalOwned = Number(document.getElementById('pm-totalowned').value) || 0;
     if (!sku || !name) {
       document.getElementById('pm-error').innerHTML = '<div class="wh-login-error">' + icon('warning', 15) + ' SKU e nome sono obbligatori.</div>';
       return;
     }
     var id = saveBtn.getAttribute('data-id') || uid();
     state.editingProduct = null;
-    upsertProduct({ id: id, sku: sku, name: name, category: category, price: price, minStock: minStock });
+    upsertProduct({ id: id, sku: sku, name: name, category: category, price: price, minStock: minStock, totalOwned: totalOwned });
     render();
   });
 }
