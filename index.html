@@ -269,11 +269,23 @@ function loadAll() {
 }
 
 function showToast(msg, kind) {
-  state.toast = { msg: msg, kind: kind || 'ok', id: uid() };
-  render();
+  var id = uid();
+  state.toast = { msg: msg, kind: kind || 'ok', id: id };
+  renderToastOnly();
   setTimeout(function () {
-    if (state.toast && state.toast.id === (state.toast || {}).id) { state.toast = null; render(); }
+    if (state.toast && state.toast.id === id) { state.toast = null; renderToastOnly(); }
   }, 3200);
+}
+
+function renderToastOnly() {
+  var existing = document.getElementById('wh-toast-el');
+  if (existing) existing.remove();
+  if (!state.toast) return;
+  var el = document.createElement('div');
+  el.id = 'wh-toast-el';
+  el.className = 'wh-toast' + (state.toast.kind === 'error' ? ' wh-toast-error' : '');
+  el.innerHTML = icon(state.toast.kind === 'error' ? 'warning' : 'check', 15) + esc(state.toast.msg);
+  document.body.appendChild(el);
 }
 
 /* ------------------------------------------------------------------
@@ -964,12 +976,9 @@ function render() {
     content = viewHistory();
   }
 
-  var toastHtml = state.toast
-    ? '<div class="wh-toast ' + (state.toast.kind === 'error' ? 'wh-toast-error' : '') + '">' + icon(state.toast.kind === 'error' ? 'warning' : 'check', 15) + esc(state.toast.msg) + '</div>'
-    : '';
-
-  root.innerHTML = '<div class="wh-root">' + viewTopBar() + '<main class="wh-main">' + content + '</main>' + toastHtml + '</div>';
+  root.innerHTML = '<div class="wh-root">' + viewTopBar() + '<main class="wh-main">' + content + '</main></div>';
   attachAppHandlers();
+  renderToastOnly();
 }
 
 /* ------------------------------------------------------------------
