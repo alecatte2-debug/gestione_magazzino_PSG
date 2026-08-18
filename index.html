@@ -110,6 +110,7 @@
   .stamp-in { color: var(--green); border-color: var(--green); }
   .stamp-out { color: var(--rust); border-color: var(--rust); }
   .stamp-mid { color: var(--steel); border-color: var(--steel); }
+  .wh-tag-badge { display: inline-block; font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.04em; padding: 2px 8px; border-radius: 3px; background: var(--paper-2); color: var(--steel); border: 1px solid var(--line); }
 
   .wh-type-tabs { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
   .wh-type-tab { display: flex; align-items: center; gap: 7px; padding: 9px 16px; border-radius: 3px; border: 1px solid var(--line); background: #fff; font-weight: 600; font-size: 13.5px; cursor: pointer; color: var(--steel); }
@@ -166,7 +167,6 @@ function fmtEuro(n) { return '€ ' + Number(n || 0).toLocaleString('it-IT', { m
 var MOVE_TYPES = {
   carico: { label: 'Reso', cls: 'stamp-in' },
   scarico: { label: 'Prestito / prelievo', cls: 'stamp-out' },
-  trasferimento: { label: 'Trasferimento', cls: 'stamp-mid' },
 };
 
 var ICONS = {
@@ -188,6 +188,8 @@ var ICONS = {
   loader: ["M12 2v4", "M12 18v4", "M4.93 4.93l2.83 2.83", "M16.24 16.24l2.83 2.83", "M2 12h4", "M18 12h4", "M4.93 19.07l2.83-2.83", "M16.24 7.76l2.83-2.83"],
   key: ["M21 2 19 4", "M7.5 15.5A5.5 5.5 0 1 0 12 6a5.5 5.5 0 0 0-4.5 9.5Z", "M11.5 11.5 4 19v3h3l7.5-7.5", "M15 15l4 4"],
   chevronRight: ["M9 18l6-6-6-6"],
+  tag: ["M20.59 13.41 11 3.83A2 2 0 0 0 9.5 3.17H4a1 1 0 0 0-1 1v5.5a2 2 0 0 0 .66 1.5l9.58 9.58a2 2 0 0 0 2.83 0l4.52-4.52a2 2 0 0 0 0-2.83Z", "M7 7h.01"],
+  calendar: ["M8 2v4", "M16 2v4", "M3 10h18", "M4 4h16a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z"],
 };
 
 function icon(name, size, cls) {
@@ -207,14 +209,16 @@ var state = {
   view: 'dashboard',
   toast: null,
   dashQuery: '',
+  dashTagFilter: 'tutti',
   prodQuery: '',
-  movementType: 'carico',
-  movementCart: [],
+  prodTagFilter: 'tutti',
   historyFilterType: 'tutti',
-  historyFilterWarehouse: 'tutti',
   editingProduct: null,   // null | 'new' | product object
   confirmDeleteProduct: null,
-  returningLoan: null,    // null | { destination, warehouseId, items: [{productId,name,sku,qty}] }
+  returningLoan: null,    // null | { destination, items: [{productId,name,sku,qty}] }
+  fulfillingReservation: null, // null | { id, productId, productName, qty, destination, note }
+  movementCart: [],
+  lastMovementErrors: [],
   loginError: '',
   loginBusy: false,
 };
@@ -228,29 +232,35 @@ function loadAll() {
   return Promise.all([
     sb.from('warehouses').select('*').order('id'),
     sb.from('products').select('*').order('name'),
-    sb.from('inventory').select('*'),
     sb.from('movements').select('*').order('ts', { ascending: false }).limit(500),
+    sb.from('reservations').select('*').eq('status', 'active').order('start_date'),
   ]).then(function (results) {
-    var wh = results[0], prod = results[1], inv = results[2], mov = results[3];
-    var firstError = wh.error || prod.error || inv.error || mov.error;
+    var wh = results[0], prod = results[1], mov = results[2], res = results[3];
+    var firstError = wh.error || prod.error || mov.error || res.error;
     if (firstError) throw firstError;
 
-    var inventory = {};
-    inv.data.forEach(function (r) {
-      if (!inventory[r.product_id]) inventory[r.product_id] = {};
-      inventory[r.product_id][r.warehouse_id] = Number(r.qty);
-    });
     var products = prod.data.map(function (p) {
-      return { id: p.id, sku: p.sku, name: p.name, category: p.category, price: Number(p.price), minStock: Number(p.min_stock), totalOwned: Number(p.total_owned || 0) };
+      return {
+        id: p.id, sku: p.sku, name: p.name, category: p.category, price: Number(p.price),
+        minStock: Number(p.min_stock), totalOwned: Number(p.total_owned || 0),
+        qty: Number(p.qty || 0), warehouseTag: p.warehouse_tag || '',
+      };
     });
     var movements = mov.data.map(function (m) {
       return {
         id: m.id, ts: new Date(m.ts).getTime(), type: m.type, user: m.user_email,
         productId: m.product_id, productName: m.product_name, productSku: m.product_sku,
-        from: m.from_warehouse, to: m.to_warehouse, qty: Number(m.qty), note: m.note, destination: m.destination,
+        qty: Number(m.qty), note: m.note, destination: m.destination,
       };
     });
-    state.db = { warehouses: wh.data, products: products, inventory: inventory, movements: movements };
+    var reservations = res.data.map(function (r) {
+      return {
+        id: r.id, productId: r.product_id, productName: r.product_name, productSku: r.product_sku,
+        qty: Number(r.qty), startDate: r.start_date, endDate: r.end_date,
+        destination: r.destination, note: r.note, createdBy: r.created_by,
+      };
+    });
+    state.db = { warehouses: wh.data, products: products, movements: movements, reservations: reservations };
     state.dbError = '';
   }).catch(function (e) {
     console.error(e);
@@ -267,85 +277,37 @@ function showToast(msg, kind) {
 }
 
 /* ------------------------------------------------------------------
-   AZIONI SUL DATABASE
+   AZIONI SUL DATABASE — magazzino unificato
 ------------------------------------------------------------------- */
-function applyCarico(productId, warehouseId, qty, note, destination) {
+function applyPrestito(productId, qty, note, destination) {
   var product = state.db.products.find(function (p) { return p.id === productId; });
-  var current = (state.db.inventory[productId] || {})[warehouseId] || 0;
-  return sb.from('inventory').upsert({ product_id: productId, warehouse_id: warehouseId, qty: current + qty })
-    .then(function (r) { if (r.error) throw r.error;
-      return sb.from('movements').insert({
-        id: uid(), type: 'carico', user_email: state.user.email, product_id: productId,
-        product_name: product.name, product_sku: product.sku, from_warehouse: null, to_warehouse: warehouseId, qty: qty, note: note, destination: destination || null,
-      });
-    }).then(function (r) { if (r.error) throw r.error; });
-}
-
-function applyScarico(productId, warehouseId, qty, note, destination) {
-  var product = state.db.products.find(function (p) { return p.id === productId; });
-  var current = (state.db.inventory[productId] || {})[warehouseId] || 0;
-  if (qty > current) return Promise.reject(new Error(product.name + ': giacenza insufficiente (disponibili ' + current + ')'));
-  return sb.from('inventory').upsert({ product_id: productId, warehouse_id: warehouseId, qty: current - qty })
+  if (qty > product.qty) return Promise.reject(new Error(product.name + ': giacenza insufficiente (disponibili ' + product.qty + ')'));
+  return sb.from('products').update({ qty: product.qty - qty }).eq('id', productId)
     .then(function (r) { if (r.error) throw r.error;
       return sb.from('movements').insert({
         id: uid(), type: 'scarico', user_email: state.user.email, product_id: productId,
-        product_name: product.name, product_sku: product.sku, from_warehouse: warehouseId, to_warehouse: null, qty: qty, note: note, destination: destination || null,
+        product_name: product.name, product_sku: product.sku, qty: qty, note: note, destination: destination || null,
       });
     }).then(function (r) { if (r.error) throw r.error; });
 }
 
-function applyTrasferimento(productId, fromId, toId, qty, note, destination) {
-  if (fromId === toId) return Promise.reject(new Error('Seleziona due magazzini diversi'));
+function applyReso(productId, qty, note, destination) {
   var product = state.db.products.find(function (p) { return p.id === productId; });
-  var current = (state.db.inventory[productId] || {})[fromId] || 0;
-  if (qty > current) return Promise.reject(new Error(product.name + ': giacenza insufficiente nell\'origine (disponibili ' + current + ')'));
-  var currentTo = (state.db.inventory[productId] || {})[toId] || 0;
-  return sb.from('inventory').upsert([
-    { product_id: productId, warehouse_id: fromId, qty: current - qty },
-    { product_id: productId, warehouse_id: toId, qty: currentTo + qty },
-  ]).then(function (r) { if (r.error) throw r.error;
-    return sb.from('movements').insert({
-      id: uid(), type: 'trasferimento', user_email: state.user.email, product_id: productId,
-      product_name: product.name, product_sku: product.sku, from_warehouse: fromId, to_warehouse: toId, qty: qty, note: note, destination: destination || null,
-    });
-  }).then(function (r) { if (r.error) throw r.error; });
+  return sb.from('products').update({ qty: product.qty + qty }).eq('id', productId)
+    .then(function (r) { if (r.error) throw r.error;
+      return sb.from('movements').insert({
+        id: uid(), type: 'carico', user_email: state.user.email, product_id: productId,
+        product_name: product.name, product_sku: product.sku, qty: qty, note: note, destination: destination || null,
+      });
+    }).then(function (r) { if (r.error) throw r.error; });
 }
 
-function doCarico(productId, warehouseId, qty, note) {
-  var product = state.db.products.find(function (p) { return p.id === productId; });
-  return applyCarico(productId, warehouseId, qty, note)
-    .then(function () { return loadAll(); })
-    .then(function () { showToast('Carico registrato: +' + qty + ' ' + product.name); })
-    .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del carico.', 'error'); });
-}
-
-function doScarico(productId, warehouseId, qty, note) {
-  var product = state.db.products.find(function (p) { return p.id === productId; });
-  var current = (state.db.inventory[productId] || {})[warehouseId] || 0;
-  if (qty > current) { showToast('Giacenza insufficiente: disponibili solo ' + current + ' unità', 'error'); return Promise.resolve(); }
-  return applyScarico(productId, warehouseId, qty, note)
-    .then(function () { return loadAll(); })
-    .then(function () { showToast('Scarico registrato: -' + qty + ' ' + product.name); })
-    .catch(function (e) { console.error(e); showToast('Errore nel salvataggio dello scarico.', 'error'); });
-}
-
-function doTrasferimento(productId, fromId, toId, qty, note) {
-  var product = state.db.products.find(function (p) { return p.id === productId; });
-  return applyTrasferimento(productId, fromId, toId, qty, note)
-    .then(function () { return loadAll(); })
-    .then(function () { showToast('Trasferite ' + qty + ' unità di ' + product.name); })
-    .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del trasferimento.', 'error'); });
-}
-
-function submitMovementBatch(lines, type, endpoints, note, destination) {
+function submitMovementBatch(lines, type, note, destination) {
   var errors = [];
   var chain = Promise.resolve();
   lines.forEach(function (line) {
     chain = chain.then(function () {
-      var p;
-      if (type === 'carico') p = applyCarico(line.productId, endpoints.warehouseId, line.qty, note, destination);
-      else if (type === 'scarico') p = applyScarico(line.productId, endpoints.warehouseId, line.qty, note, destination);
-      else p = applyTrasferimento(line.productId, endpoints.fromId, endpoints.toId, line.qty, note, destination);
+      var p = (type === 'carico') ? applyReso(line.productId, line.qty, note, destination) : applyPrestito(line.productId, line.qty, note, destination);
       return p.catch(function (e) { errors.push(e.message || String(e)); });
     });
   });
@@ -358,18 +320,76 @@ function submitMovementBatch(lines, type, endpoints, note, destination) {
   });
 }
 
-function upsertProduct(product, stockOverrides) {
+/* ------------------------------------------------------------------
+   PRENOTAZIONI FUTURE
+------------------------------------------------------------------- */
+function datesOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart <= bEnd && aEnd >= bStart;
+}
+
+// Disponibilità di un prodotto nel periodo [startDate, endDate] (stringhe YYYY-MM-DD),
+// considerando la giacenza attuale meno le prenotazioni attive che si sovrappongono al periodo.
+function computeAvailability(productId, startDate, endDate) {
+  var product = state.db.products.find(function (p) { return p.id === productId; });
+  if (!product) return 0;
+  var reserved = state.db.reservations
+    .filter(function (r) { return r.productId === productId && datesOverlap(r.startDate, r.endDate, startDate, endDate); })
+    .reduce(function (s, r) { return s + r.qty; }, 0);
+  return product.qty - reserved;
+}
+
+function submitReservationBatch(lines, startDate, endDate, destination, note) {
+  // Validazione rigida: se anche solo una riga non ha disponibilità sufficiente, non si salva nulla.
+  var errors = [];
+  lines.forEach(function (line) {
+    var product = state.db.products.find(function (p) { return p.id === line.productId; });
+    var available = computeAvailability(line.productId, startDate, endDate);
+    if (line.qty > available) {
+      errors.push(product.name + ': disponibili solo ' + available + ' nel periodo scelto (richiesti ' + line.qty + ')');
+    }
+  });
+  if (errors.length) return Promise.resolve(errors);
+
+  var rows = lines.map(function (line) {
+    var product = state.db.products.find(function (p) { return p.id === line.productId; });
+    return {
+      id: uid(), product_id: line.productId, product_name: product.name, product_sku: product.sku,
+      qty: line.qty, start_date: startDate, end_date: endDate, destination: destination, note: note || null,
+      created_by: state.user.email, status: 'active',
+    };
+  });
+  return sb.from('reservations').insert(rows).then(function (r) {
+    if (r.error) return [r.error.message || 'Errore nel salvataggio'];
+    return loadAll().then(function () {
+      showToast(lines.length + ' prenotazion' + (lines.length === 1 ? 'e' : 'i') + ' registrat' + (lines.length === 1 ? 'a' : 'e'));
+      return [];
+    });
+  });
+}
+
+function cancelReservation(id) {
+  return sb.from('reservations').update({ status: 'cancelled' }).eq('id', id)
+    .then(function (r) { if (r.error) throw r.error; return loadAll(); })
+    .then(function () { showToast('Prenotazione annullata'); })
+    .catch(function (e) { console.error(e); showToast("Errore nell'annullamento.", 'error'); });
+}
+
+function fulfillReservation(reservation, qty, note) {
+  return applyPrestito(reservation.productId, qty, note || reservation.note, reservation.destination)
+    .then(function () {
+      return sb.from('reservations').update({ status: 'fulfilled' }).eq('id', reservation.id);
+    })
+    .then(function (r) { if (r && r.error) throw r.error; return loadAll(); })
+    .then(function () { showToast('Prestito registrato: -' + qty + ' ' + reservation.productName); })
+    .catch(function (e) { console.error(e); showToast(e.message || 'Errore nella registrazione del prestito', 'error'); });
+}
+
+function upsertProduct(product) {
   var isNew = !state.db.products.some(function (p) { return p.id === product.id; });
   return sb.from('products').upsert({
-    id: product.id, sku: product.sku, name: product.name, category: product.category, price: product.price, min_stock: product.minStock, total_owned: product.totalOwned,
-  }).then(function (r) {
-    if (r.error) throw r.error;
-    var rows = state.db.warehouses.map(function (w) {
-      var qty = (stockOverrides && stockOverrides[w.id] !== undefined) ? stockOverrides[w.id] : 0;
-      return { product_id: product.id, warehouse_id: w.id, qty: qty };
-    });
-    return sb.from('inventory').upsert(rows);
-  }).then(function () { return loadAll(); })
+    id: product.id, sku: product.sku, name: product.name, category: product.category, price: product.price,
+    min_stock: product.minStock, total_owned: product.totalOwned, qty: product.qty, warehouse_tag: product.warehouseTag || null,
+  }).then(function (r) { if (r.error) throw r.error; return loadAll(); })
     .then(function () { showToast(isNew ? 'Prodotto aggiunto' : 'Prodotto aggiornato'); })
     .catch(function (e) { console.error(e); showToast('Errore nel salvataggio del prodotto.', 'error'); });
 }
@@ -393,7 +413,6 @@ function doLogin() {
   sb.auth.signInWithPassword({ email: email, password: password }).then(function (r) {
     state.loginBusy = false;
     if (r.error) { state.loginError = 'Email o password non validi.'; render(); }
-    // se ok, onAuthStateChange gestisce il resto
   }).catch(function () {
     state.loginBusy = false;
     state.loginError = 'Errore di connessione. Riprova.';
@@ -401,9 +420,7 @@ function doLogin() {
   });
 }
 
-function doLogout() {
-  sb.auth.signOut();
-}
+function doLogout() { sb.auth.signOut(); }
 
 sb.auth.getSession().then(function (r) {
   state.authChecked = true;
@@ -428,7 +445,7 @@ function viewLogin() {
     '<div class="wh-badge-strip"></div>' +
     '<div class="wh-login-head">' +
     '<div class="wh-login-icon">' + icon('key', 22) + '</div>' +
-    '<div><p class="wh-eyebrow">Accesso riservato</p><h1 class="wh-display">Controllo Magazzini</h1></div>' +
+    '<div><p class="wh-eyebrow">Accesso riservato</p><h1 class="wh-display">Controllo Magazzino</h1></div>' +
     '</div>' +
     '<p class="wh-login-sub">Accedi con l\'email e la password create per te su Supabase.</p>' +
     '<div class="wh-login-form">' +
@@ -448,7 +465,9 @@ function viewLogin() {
 function viewTopBar() {
   var items = [
     { id: 'dashboard', label: 'Giacenze', icon: 'boxes' },
-    { id: 'movement', label: 'Nuovo movimento', icon: 'swap' },
+    { id: 'loan', label: 'Prestito / prelievo', icon: 'packageMinus' },
+    { id: 'return', label: 'Reso', icon: 'packagePlus' },
+    { id: 'reservations', label: 'Prenotazioni', icon: 'calendar' },
     { id: 'history', label: 'Storico', icon: 'history' },
     { id: 'products', label: 'Prodotti', icon: 'box' },
   ];
@@ -456,8 +475,8 @@ function viewTopBar() {
     return '<button class="wh-nav-btn ' + (state.view === it.id ? 'active' : '') + '" data-nav="' + it.id + '">' + icon(it.icon, 16) + '<span>' + it.label + '</span></button>';
   }).join('');
   return (
-    '<header class="wh-topbar"><div class="wh-topbar-left"><span class="wh-logo-mark">M2</span>' +
-    '<div><p class="wh-eyebrow">Gestione magazzini</p><p class="wh-user-line">' + esc(state.user.email) + '</p></div></div>' +
+    '<header class="wh-topbar"><div class="wh-topbar-left"><span class="wh-logo-mark">M</span>' +
+    '<div><p class="wh-eyebrow">Gestione magazzino</p><p class="wh-user-line">' + esc(state.user.email) + '</p></div></div>' +
     '<nav class="wh-nav">' + navHtml + '</nav>' +
     '<button class="wh-btn wh-btn-ghost" id="btn-logout">' + icon('logout', 16) + ' Esci</button>' +
     '</header>'
@@ -471,65 +490,68 @@ function viewHeader(eyebrow, title, subtitle, actionHtml) {
   );
 }
 
+function tagOptionsHtml(list, selected) {
+  var tags = {};
+  state.db.products.forEach(function (p) { if (p.warehouseTag) tags[p.warehouseTag] = true; });
+  var opts = '<option value="tutti">Tutti i magazzini</option>';
+  Object.keys(tags).sort().forEach(function (t) {
+    opts += '<option value="' + esc(t) + '" ' + (selected === t ? 'selected' : '') + '>' + esc(t) + '</option>';
+  });
+  return opts;
+}
+
 /* ------------------------------------------------------------------
-   TEMPLATE: DASHBOARD
+   TEMPLATE: DASHBOARD (GIACENZE)
 ------------------------------------------------------------------- */
 function dashboardRows() {
   var q = state.dashQuery.trim().toLowerCase();
-  var db = state.db;
-  return db.products.filter(function (p) {
-    return !q || p.name.toLowerCase().indexOf(q) > -1 || p.sku.toLowerCase().indexOf(q) > -1 || (p.category || '').toLowerCase().indexOf(q) > -1;
-  }).map(function (p) {
-    var inv = db.inventory[p.id] || {};
-    var total = db.warehouses.reduce(function (s, w) { return s + (inv[w.id] || 0); }, 0);
-    return { product: p, inv: inv, total: total };
+  var tag = state.dashTagFilter;
+  return state.db.products.filter(function (p) {
+    var matchesQ = !q || p.name.toLowerCase().indexOf(q) > -1 || p.sku.toLowerCase().indexOf(q) > -1 || (p.category || '').toLowerCase().indexOf(q) > -1;
+    var matchesTag = tag === 'tutti' || p.warehouseTag === tag;
+    return matchesQ && matchesTag;
   });
 }
 
 function dashboardTableHtml() {
-  var db = state.db;
   var rows = dashboardRows();
-  var whHeaders = db.warehouses.map(function (w) { return '<th class="wh-num">' + esc(w.name) + '</th>'; }).join('');
-  var body = rows.map(function (r) {
-    var whCells = db.warehouses.map(function (w) {
-      var qty = r.inv[w.id] || 0;
-      var low = qty <= (r.product.minStock || 0);
-      return '<td class="wh-num"><span class="' + (low ? 'wh-qty-low' : '') + '">' + qty + '</span>' + (low ? icon('warning', 12, 'wh-low-icon') : '') + '</td>';
-    }).join('');
+  var body = rows.map(function (p) {
+    var low = p.qty <= (p.minStock || 0);
     var outCell;
-    if (r.product.totalOwned > 0) {
-      var out = r.product.totalOwned - r.total;
-      outCell = '<td class="wh-num ' + (out > 0 ? 'wh-qty-low' : '') + '">' + out + ' <span class="wh-dim">/ ' + r.product.totalOwned + '</span></td>';
+    if (p.totalOwned > 0) {
+      var out = p.totalOwned - p.qty;
+      outCell = '<td class="wh-num ' + (out > 0 ? 'wh-qty-low' : '') + '">' + out + ' <span class="wh-dim">/ ' + p.totalOwned + '</span></td>';
     } else {
       outCell = '<td class="wh-num wh-dim">—</td>';
     }
-    return '<tr><td class="wh-strong">' + esc(r.product.name) + '</td><td class="wh-mono">' + esc(r.product.sku) + '</td><td>' + esc(r.product.category) + '</td>' + whCells + '<td class="wh-num wh-strong">' + r.total + '</td>' + outCell + '</tr>';
+    return (
+      '<tr><td class="wh-strong">' + esc(p.name) + '</td><td class="wh-mono">' + esc(p.sku) + '</td><td>' + esc(p.category) + '</td>' +
+      '<td>' + (p.warehouseTag ? '<span class="wh-tag-badge">' + esc(p.warehouseTag) + '</span>' : '<span class="wh-dim">—</span>') + '</td>' +
+      '<td class="wh-num"><span class="' + (low ? 'wh-qty-low' : '') + '">' + p.qty + '</span>' + (low ? icon('warning', 12, 'wh-low-icon') : '') + '</td>' +
+      outCell + '</tr>'
+    );
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="' + (5 + db.warehouses.length) + '" class="wh-empty">Nessun prodotto trovato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="6" class="wh-empty">Nessun prodotto trovato.</td></tr>';
   return (
-    '<table class="wh-table"><thead><tr><th>Prodotto</th><th>SKU</th><th>Categoria</th>' + whHeaders + '<th class="wh-num">Totale</th><th class="wh-num">Fuori</th></tr></thead><tbody>' + body + '</tbody></table>'
+    '<table class="wh-table"><thead><tr><th>Prodotto</th><th>SKU</th><th>Categoria</th><th>Magazzino</th><th class="wh-num">Giacenza</th><th class="wh-num">Fuori</th></tr></thead><tbody>' + body + '</tbody></table>'
   );
 }
 
 function viewDashboard() {
-  var db = state.db;
   var rows = dashboardRows();
-  var totals = db.warehouses.map(function (w) {
-    var units = rows.reduce(function (s, r) { return s + (r.inv[w.id] || 0); }, 0);
-    var value = rows.reduce(function (s, r) { return s + (r.inv[w.id] || 0) * r.product.price; }, 0);
-    return { warehouse: w, units: units, value: value };
-  });
-  var summaryHtml = totals.map(function (t) {
-    return '<div class="wh-summary-card"><p class="wh-eyebrow">' + esc(t.warehouse.name) + '</p>' +
-      '<p class="wh-summary-number">' + t.units.toLocaleString('it-IT') + ' <span>unità</span></p>' +
-      '<p class="wh-summary-sub">Valore stimato ' + fmtEuro(t.value) + '</p></div>';
-  }).join('');
+  var totalUnits = rows.reduce(function (s, p) { return s + p.qty; }, 0);
+  var totalValue = rows.reduce(function (s, p) { return s + p.qty * p.price; }, 0);
 
   return (
     '<div class="wh-view">' +
-    viewHeader('Panoramica', 'Giacenze per magazzino', 'Quantità disponibili prodotto per prodotto, aggiornate ad ogni movimento.') +
-    '<div class="wh-summary-row">' + summaryHtml + '</div>' +
-    '<div class="wh-searchbar">' + icon('search', 15) + '<input id="dash-search" placeholder="Cerca per nome, SKU o categoria…" value="' + esc(state.dashQuery) + '" /></div>' +
+    viewHeader('Panoramica', 'Giacenze', 'Quantità disponibili per ogni prodotto, aggiornate ad ogni movimento.') +
+    '<div class="wh-summary-row">' +
+    '<div class="wh-summary-card"><p class="wh-eyebrow">Totale unità</p><p class="wh-summary-number">' + totalUnits.toLocaleString('it-IT') + ' <span>unità</span></p><p class="wh-summary-sub">Valore stimato ' + fmtEuro(totalValue) + '</p></div>' +
+    '</div>' +
+    '<div class="wh-filters">' +
+    '<div class="wh-searchbar" style="margin-bottom:0;">' + icon('search', 15) + '<input id="dash-search" placeholder="Cerca per nome, SKU o categoria…" value="' + esc(state.dashQuery) + '" /></div>' +
+    '<select id="dash-tag-filter">' + tagOptionsHtml(null, state.dashTagFilter) + '</select>' +
+    '</div>' +
     '<div class="wh-table-wrap" id="dash-table-wrap">' + dashboardTableHtml() + '</div>' +
     '</div>'
   );
@@ -540,8 +562,11 @@ function viewDashboard() {
 ------------------------------------------------------------------- */
 function productsFiltered() {
   var q = state.prodQuery.trim().toLowerCase();
+  var tag = state.prodTagFilter;
   return state.db.products.filter(function (p) {
-    return !q || p.name.toLowerCase().indexOf(q) > -1 || p.sku.toLowerCase().indexOf(q) > -1;
+    var matchesQ = !q || p.name.toLowerCase().indexOf(q) > -1 || p.sku.toLowerCase().indexOf(q) > -1;
+    var matchesTag = tag === 'tutti' || p.warehouseTag === tag;
+    return matchesQ && matchesTag;
   });
 }
 
@@ -550,15 +575,17 @@ function productsTableHtml() {
   var body = rows.map(function (p) {
     return (
       '<tr><td class="wh-mono">' + esc(p.sku) + '</td><td class="wh-strong">' + esc(p.name) + '</td><td>' + esc(p.category) + '</td>' +
+      '<td>' + (p.warehouseTag ? '<span class="wh-tag-badge">' + esc(p.warehouseTag) + '</span>' : '<span class="wh-dim">—</span>') + '</td>' +
+      '<td class="wh-num">' + p.qty + '</td>' +
       '<td class="wh-num">' + fmtEuro(p.price) + '</td><td class="wh-num">' + (p.minStock || 0) + '</td>' +
       '<td class="wh-num">' + (p.totalOwned > 0 ? p.totalOwned : '—') + '</td>' +
       '<td class="wh-row-actions"><button class="wh-icon-btn" data-edit-product="' + esc(p.id) + '">' + icon('pencil', 14) + '</button>' +
       '<button class="wh-icon-btn wh-icon-danger" data-delete-product="' + esc(p.id) + '">' + icon('trash', 14) + '</button></td></tr>'
     );
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="7" class="wh-empty">Nessun prodotto trovato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="9" class="wh-empty">Nessun prodotto trovato.</td></tr>';
   return (
-    '<table class="wh-table"><thead><tr><th>SKU</th><th>Nome</th><th>Categoria</th><th class="wh-num">Prezzo</th><th class="wh-num">Scorta minima</th><th class="wh-num">Tot. posseduto</th><th></th></tr></thead><tbody>' + body + '</tbody></table>'
+    '<table class="wh-table"><thead><tr><th>SKU</th><th>Nome</th><th>Categoria</th><th>Magazzino</th><th class="wh-num">Giacenza</th><th class="wh-num">Prezzo</th><th class="wh-num">Scorta minima</th><th class="wh-num">Tot. posseduto</th><th></th></tr></thead><tbody>' + body + '</tbody></table>'
   );
 }
 
@@ -568,24 +595,29 @@ function viewProducts() {
   if (state.editingProduct) modal = productModalHtml(state.editingProduct === 'new' ? null : state.editingProduct);
   if (state.confirmDeleteProduct) modal += confirmModalHtml(
     'Eliminare il prodotto?',
-    '"' + esc(state.confirmDeleteProduct.name) + '" verrà rimosso dall\'anagrafica e dalle giacenze. Lo storico movimenti resterà invariato.'
+    '"' + esc(state.confirmDeleteProduct.name) + '" verrà rimosso dall\'anagrafica. Lo storico movimenti resterà invariato.'
   );
   return (
     '<div class="wh-view">' +
-    viewHeader('Anagrafica', 'Prodotti', 'Codice, categoria e prezzo di ogni articolo gestito nei due magazzini.', action) +
-    '<div class="wh-searchbar">' + icon('search', 15) + '<input id="prod-search" placeholder="Cerca per nome o SKU…" value="' + esc(state.prodQuery) + '" /></div>' +
+    viewHeader('Anagrafica', 'Prodotti', 'Codice, categoria, magazzino di riferimento e giacenza di ogni articolo.', action) +
+    '<div class="wh-filters">' +
+    '<div class="wh-searchbar" style="margin-bottom:0;">' + icon('search', 15) + '<input id="prod-search" placeholder="Cerca per nome o SKU…" value="' + esc(state.prodQuery) + '" /></div>' +
+    '<select id="prod-tag-filter">' + tagOptionsHtml(null, state.prodTagFilter) + '</select>' +
+    '</div>' +
     '<div class="wh-table-wrap" id="prod-table-wrap">' + productsTableHtml() + '</div>' +
     '</div>' + modal
   );
 }
 
+function warehouseTagDatalist() {
+  var tags = {};
+  state.db.warehouses.forEach(function (w) { tags[w.name] = true; });
+  state.db.products.forEach(function (p) { if (p.warehouseTag) tags[p.warehouseTag] = true; });
+  return '<datalist id="warehouse-tags">' + Object.keys(tags).map(function (t) { return '<option value="' + esc(t) + '">'; }).join('') + '</datalist>';
+}
+
 function productModalHtml(product) {
-  var p = product || { id: '', sku: '', name: '', category: '', price: '', minStock: '', totalOwned: '' };
-  var currentInv = product ? (state.db.inventory[product.id] || {}) : {};
-  var stockFields = state.db.warehouses.map(function (w) {
-    var val = currentInv[w.id] || 0;
-    return '<label class="wh-field"><span>Giacenza — ' + esc(w.name) + '</span><input class="pm-stock" data-warehouse="' + esc(w.id) + '" type="number" min="0" value="' + val + '" placeholder="0" /></label>';
-  }).join('');
+  var p = product || { id: '', sku: '', name: '', category: '', price: '', minStock: '', totalOwned: '', qty: '', warehouseTag: '' };
   return (
     '<div class="wh-modal-overlay" id="product-modal-overlay"><div class="wh-modal">' +
     '<div class="wh-modal-head"><h2 class="wh-display-sm">' + (product ? 'Modifica prodotto' : 'Nuovo prodotto') + '</h2>' +
@@ -594,14 +626,15 @@ function productModalHtml(product) {
     '<label class="wh-field"><span>SKU / Codice</span><input id="pm-sku" value="' + esc(p.sku) + '" placeholder="es. VT-1001" /></label>' +
     '<label class="wh-field"><span>Nome prodotto</span><input id="pm-name" value="' + esc(p.name) + '" placeholder="es. Vite autofilettante 4x30" /></label>' +
     '<label class="wh-field"><span>Categoria</span><input id="pm-category" value="' + esc(p.category) + '" placeholder="es. Ferramenta" /></label>' +
+    '<label class="wh-field"><span>Magazzino di riferimento</span><input id="pm-warehousetag" list="warehouse-tags" value="' + esc(p.warehouseTag) + '" placeholder="es. Esterno, Cucina…" /></label>' +
+    '<label class="wh-field"><span>Giacenza attuale</span><input id="pm-qty" type="number" min="0" value="' + esc(p.qty) + '" placeholder="0" /></label>' +
     '<label class="wh-field"><span>Prezzo unitario (€)</span><input id="pm-price" type="number" step="0.01" min="0" value="' + esc(p.price) + '" placeholder="0.00" /></label>' +
     '<label class="wh-field"><span>Scorta minima (avviso)</span><input id="pm-minstock" type="number" min="0" value="' + esc(p.minStock) + '" placeholder="0" /></label>' +
     '<label class="wh-field wh-field-wide"><span>Quantità totale posseduta (opzionale)</span><input id="pm-totalowned" type="number" min="0" value="' + esc(p.totalOwned) + '" placeholder="es. 20 — lascia vuoto se non applicabile" /></label>' +
-    stockFields +
     '<div id="pm-error"></div>' +
     '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="pm-cancel">Annulla</button>' +
     '<button type="button" class="wh-btn wh-btn-primary" id="pm-save" data-id="' + esc(p.id) + '">' + icon('check', 16) + ' Salva</button></div>' +
-    '</div></div></div>'
+    '</div>' + warehouseTagDatalist() + '</div></div>'
   );
 }
 
@@ -616,8 +649,62 @@ function confirmModalHtml(title, message) {
 }
 
 /* ------------------------------------------------------------------
-   TEMPLATE: NUOVO MOVIMENTO
+   TEMPLATE: PRESTITO / PRELIEVO e RESO (pagine separate)
 ------------------------------------------------------------------- */
+function productOptionsHtml(type) {
+  var list = state.db.products;
+  if (type === 'scarico') list = list.filter(function (p) { return p.qty > 0; });
+  if (!list.length) return '<option value="">— Nessun prodotto disponibile —</option>';
+  return list.map(function (p) {
+    var suffix = type === 'scarico' ? ' (disponibili: ' + p.qty + ')' : ' (in giacenza: ' + p.qty + ')';
+    return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + suffix + '</option>';
+  }).join('');
+}
+
+function stockHintHtml(productId) {
+  var product = state.db.products.find(function (p) { return p.id === productId; });
+  if (!product) return '';
+  return '<span>Giacenza attuale: <span class="wh-mono wh-strong">' + product.qty + '</span></span>';
+}
+
+function movementErrorsHtml() {
+  if (!state.lastMovementErrors.length) return '';
+  var items = state.lastMovementErrors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('');
+  return '<div class="wh-login-error" style="align-items:flex-start; margin-top:16px;">' + icon('warning', 15) +
+    '<div><strong>Alcuni articoli NON sono stati registrati:</strong><ul style="margin:6px 0 0; padding-left:18px;">' + items + '</ul></div></div>';
+}
+
+function viewMovementPage(type) {
+  var isLoan = type === 'scarico';
+  var noteFieldHtml = isLoan
+    ? '<label class="wh-field wh-field-wide"><span>Destinazione (obbligatoria)</span><input id="mv-destination" placeholder="es. evento del 15/08, nome cliente/evento…" /></label>' +
+      '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. dettagli aggiuntivi…" /></label>'
+    : '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. stato degli articoli, bolla…" /></label>';
+
+  return (
+    '<div class="wh-view">' +
+    viewHeader('Operazione', isLoan ? 'Prestito / prelievo' : 'Reso',
+      isLoan ? 'Registra l\'uscita di uno o più articoli. Aggiungi più prodotti alla lista per registrarli insieme (es. materiale per lo stesso evento).' : 'Registra il rientro di uno o più articoli.') +
+    '<div class="wh-movement-card">' +
+    '<p class="wh-eyebrow" style="margin-bottom:10px;">Aggiungi articolo</p>' +
+    '<div class="wh-form-grid">' +
+    '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptionsHtml(type) + '</select></label>' +
+    '<label class="wh-field"><span>Quantità</span><input id="mv-qty" type="number" min="1" placeholder="0" /></label>' +
+    '<div style="align-self:end;"><button type="button" id="mv-add-line" class="wh-btn wh-btn-ghost" style="width:100%; justify-content:center;">' + icon('plus', 16) + ' Aggiungi alla lista</button></div>' +
+    '</div>' +
+    '<div class="wh-stock-hint" id="mv-stock-hint"></div>' +
+
+    '<p class="wh-eyebrow" style="margin:20px 0 10px;">Lista articoli da registrare</p>' +
+    '<div id="mv-cart-wrap">' + cartLinesHtml() + '</div>' +
+
+    '<div class="wh-form-grid" style="margin-top:18px;">' + noteFieldHtml + '</div>' +
+
+    '<div id="mv-errors">' + movementErrorsHtml() + '</div>' +
+    '<button type="button" id="mv-submit" data-move-type="' + type + '" class="wh-btn wh-btn-primary wh-submit-move ' + MOVE_TYPES[type].cls + '" style="margin-top:16px;">' + icon('chevronRight', 16) + ' Conferma ' + MOVE_TYPES[type].label.toLowerCase() + '</button>' +
+    '</div></div>'
+  );
+}
+
 function cartLinesHtml() {
   if (!state.movementCart.length) return '<p class="wh-dim" style="margin:0;">Nessun articolo in lista — aggiungine uno qui sopra, oppure premi direttamente "Conferma" per registrare solo questo.</p>';
   var rows = state.movementCart.map(function (line, i) {
@@ -627,111 +714,25 @@ function cartLinesHtml() {
   return '<table class="wh-table"><tbody>' + rows + '</tbody></table>';
 }
 
-function productOptionsHtml(type, warehouseId) {
-  var db = state.db;
-  var list = db.products;
-  if (type !== 'carico' && warehouseId) {
-    list = list.filter(function (p) { return ((db.inventory[p.id] || {})[warehouseId] || 0) > 0; });
-  }
-  if (!list.length) return '<option value="">— Nessun prodotto disponibile in questo magazzino —</option>';
-  return list.map(function (p) {
-    var qty = (db.inventory[p.id] || {})[warehouseId] || 0;
-    var suffix = type !== 'carico' ? ' (disponibili: ' + qty + ')' : '';
-    return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + suffix + '</option>';
-  }).join('');
-}
-
-function viewMovement() {
-  var db = state.db;
-  var type = state.movementType;
-  var tabs = [
-    { id: 'carico', icon: 'packagePlus' },
-    { id: 'scarico', icon: 'packageMinus' },
-    { id: 'trasferimento', icon: 'swap' },
-  ].map(function (t) {
-    return '<button type="button" class="wh-type-tab ' + (type === t.id ? 'active' : '') + '" data-move-type="' + t.id + '">' + icon(t.icon, 16) + ' ' + MOVE_TYPES[t.id].label + '</button>';
-  }).join('');
-
-  var warehouseOptions = db.warehouses.map(function (w) { return '<option value="' + esc(w.id) + '">' + esc(w.name) + '</option>'; }).join('');
-  var referenceWarehouseId = db.warehouses[0] ? db.warehouses[0].id : null;
-
-  var fieldsHtml;
-  if (type !== 'trasferimento') {
-    fieldsHtml = '<label class="wh-field"><span>Magazzino</span><select id="mv-warehouse">' + warehouseOptions + '</select></label>';
-  } else {
-    var toOptions = db.warehouses.map(function (w, i) { return '<option value="' + esc(w.id) + '" ' + (i === 1 ? 'selected' : '') + '>' + esc(w.name) + '</option>'; }).join('');
-    fieldsHtml =
-      '<label class="wh-field"><span>Da</span><select id="mv-from">' + warehouseOptions + '</select></label>' +
-      '<label class="wh-field"><span>A</span><select id="mv-to">' + toOptions + '</select></label>';
-  }
-
-  var noteFieldHtml = type === 'scarico'
-    ? '<label class="wh-field wh-field-wide"><span>Destinazione (obbligatoria)</span><input id="mv-destination" placeholder="es. evento del 15/08, nome cliente/evento…" /></label>' +
-      '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. dettagli aggiuntivi…" /></label>'
-    : '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="mv-note" placeholder="es. bolla n. 445, fornitore…" /></label>';
-
-  var productSelectHtml = '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptionsHtml(type, referenceWarehouseId) + '</select></label>';
-
-  return (
-    '<div class="wh-view">' +
-    viewHeader('Operazione', 'Registra un movimento', "Prestito/prelievo e reso aggiornano la giacenza di un magazzino; il trasferimento sposta merce tra i due. Aggiungi più articoli alla lista per registrarli tutti insieme (es. materiale per lo stesso evento).") +
-    '<div class="wh-type-tabs">' + tabs + '</div>' +
-    '<div class="wh-movement-card">' +
-    '<p class="wh-eyebrow" style="margin-bottom:10px;">Magazzino / destinazione (comune a tutta la lista)</p>' +
-    '<div class="wh-form-grid" style="margin-bottom:18px;">' + fieldsHtml + '</div>' +
-
-    '<p class="wh-eyebrow" style="margin-bottom:10px;">Aggiungi articolo</p>' +
-    '<div class="wh-form-grid">' +
-    '<div id="mv-product-wrap" style="grid-column:1/-1;">' + productSelectHtml + '</div>' +
-    '<label class="wh-field"><span>Quantità</span><input id="mv-qty" type="number" min="1" placeholder="0" /></label>' +
-    '<div style="align-self:end;"><button type="button" id="mv-add-line" class="wh-btn wh-btn-ghost" style="width:100%; justify-content:center;">' + icon('plus', 16) + ' Aggiungi alla lista</button></div>' +
-    '</div>' +
-    '<div class="wh-stock-hint" id="mv-stock-hint"></div>' +
-
-    '<p class="wh-eyebrow" style="margin:20px 0 10px;">Lista articoli da registrare</p>' +
-    '<div id="mv-cart-wrap">' + cartLinesHtml() + '</div>' +
-
-    '<div class="wh-form-grid" style="margin-top:18px;">' +
-    noteFieldHtml +
-    '</div>' +
-
-    '<button type="button" id="mv-submit" class="wh-btn wh-btn-primary wh-submit-move ' + MOVE_TYPES[type].cls + '" style="margin-top:16px;">' + icon('chevronRight', 16) + ' Conferma ' + MOVE_TYPES[type].label.toLowerCase() + '</button>' +
-    '</div></div>'
-  );
-}
-
-function stockHintHtml(productId) {
-  var db = state.db;
-  var product = db.products.find(function (p) { return p.id === productId; });
-  if (!product) return '';
-  var inv = db.inventory[productId] || {};
-  var parts = db.warehouses.map(function (w) { return '<span class="wh-mono">' + esc(w.name) + ': ' + (inv[w.id] || 0) + '</span>'; });
-  return '<span>Giacenza attuale — </span>' + parts.join('  ·  ');
-}
-
 /* ------------------------------------------------------------------
-   PRESTITI APERTI (raggruppati per nota/causale)
+   PRESTITI APERTI (raggruppati per destinazione)
 ------------------------------------------------------------------- */
 function computeOpenLoans() {
   var db = state.db;
-  var groups = {}; // destination -> { destination, warehouseId, items: { productId: {name, sku, outQty, inQty} } }
+  var groups = {};
 
-  // Prima passata: tutte le uscite (prestiti/prelievi), indipendentemente dall'ordine cronologico
   db.movements.forEach(function (m) {
     if (!m.destination || m.type !== 'scarico') return;
     var g = groups[m.destination];
-    if (!g) g = groups[m.destination] = { destination: m.destination, warehouseId: m.from, items: {} };
+    if (!g) g = groups[m.destination] = { destination: m.destination, items: {} };
     var it = g.items[m.productId] || (g.items[m.productId] = { productId: m.productId, name: m.productName, sku: m.productSku, outQty: 0, inQty: 0 });
     it.outQty += m.qty;
   });
 
-  // Seconda passata: tutti i resi (carico) che corrispondono a una destinazione conosciuta
   db.movements.forEach(function (m) {
     if (!m.destination || m.type !== 'carico') return;
     var g = groups[m.destination];
-    if (g && g.warehouseId === m.to && g.items[m.productId]) {
-      g.items[m.productId].inQty += m.qty;
-    }
+    if (g && g.items[m.productId]) g.items[m.productId].inQty += m.qty;
   });
 
   var result = [];
@@ -740,20 +741,14 @@ function computeOpenLoans() {
     var items = Object.keys(g.items).map(function (pid) { return g.items[pid]; })
       .map(function (it) { return { productId: it.productId, name: it.name, sku: it.sku, outstanding: it.outQty - it.inQty }; })
       .filter(function (it) { return it.outstanding > 0; });
-    if (items.length) result.push({ destination: g.destination, warehouseId: g.warehouseId, items: items });
+    if (items.length) result.push({ destination: g.destination, items: items });
   });
   return result;
 }
 
-/* ------------------------------------------------------------------
-   TEMPLATE: STORICO
-------------------------------------------------------------------- */
-
 function openLoansHtml() {
-  var db = state.db;
   var loans = computeOpenLoans();
   if (!loans.length) return '';
-  function whName(id) { var w = db.warehouses.find(function (w) { return w.id === id; }); return w ? w.name : '—'; }
   var cards = loans.map(function (loan) {
     var itemsList = loan.items.map(function (it) {
       return '<li>' + esc(it.name) + ' — <span class="wh-strong">' + it.outstanding + '</span> fuori</li>';
@@ -761,7 +756,7 @@ function openLoansHtml() {
     return (
       '<div class="wh-summary-card" style="margin-bottom:10px;">' +
       '<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px; flex-wrap:wrap;">' +
-      '<div><p class="wh-eyebrow">' + esc(whName(loan.warehouseId)) + '</p><p class="wh-strong" style="margin:2px 0 8px;">' + esc(loan.destination) + '</p>' +
+      '<div><p class="wh-strong" style="margin:0 0 8px;">' + esc(loan.destination) + '</p>' +
       '<ul style="margin:0; padding-left:18px; font-size:13px; color:var(--steel);">' + itemsList + '</ul></div>' +
       '<button type="button" class="wh-btn wh-btn-primary wh-submit-move stamp-in" data-return-loan="' + esc(loan.destination) + '">' + icon('packagePlus', 16) + ' Registra reso</button>' +
       '</div></div>'
@@ -769,7 +764,7 @@ function openLoansHtml() {
   }).join('');
   return (
     '<div class="wh-view" style="margin-bottom:26px;">' +
-    viewHeader('In corso', 'Prestiti aperti', 'Uscite non ancora rientrate, raggruppate per destinazione. Il reso torna automaticamente nel magazzino di origine.') +
+    viewHeader('In corso', 'Prestiti aperti', 'Uscite non ancora rientrate, raggruppate per destinazione.') +
     cards +
     '</div>'
   );
@@ -795,21 +790,120 @@ function returnModalHtml() {
   );
 }
 
+/* ------------------------------------------------------------------
+   TEMPLATE: PRENOTAZIONI
+------------------------------------------------------------------- */
+function todayStr() {
+  var d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function reservationCartLinesHtml() {
+  if (!state.movementCart.length) return '<p class="wh-dim" style="margin:0;">Nessun articolo in lista — aggiungine uno qui sopra.</p>';
+  var rows = state.movementCart.map(function (line, i) {
+    return '<tr><td class="wh-strong">' + esc(line.productName) + '</td><td class="wh-mono wh-num">' + line.qty + '</td>' +
+      '<td class="wh-row-actions"><button class="wh-icon-btn wh-icon-danger" data-remove-cart-line="' + i + '">' + icon('x', 14) + '</button></td></tr>';
+  }).join('');
+  return '<table class="wh-table"><tbody>' + rows + '</tbody></table>';
+}
+
+function existingReservationsHtml() {
+  var list = state.db.reservations.slice().sort(function (a, b) { return a.startDate < b.startDate ? -1 : 1; });
+  if (!list.length) return '<p class="wh-dim">Nessuna prenotazione attiva al momento.</p>';
+  var today = todayStr();
+  var rows = list.map(function (r) {
+    var isPast = r.endDate < today;
+    var isNow = !isPast && r.startDate <= today;
+    var badge = isPast ? '<span class="wh-dim">conclusa</span>' : (isNow ? '<span class="wh-strong" style="color:var(--green);">in corso</span>' : '<span class="wh-strong" style="color:var(--amber-deep);">futura</span>');
+    return (
+      '<tr><td class="wh-strong">' + esc(r.productName) + '</td><td class="wh-num">' + r.qty + '</td>' +
+      '<td class="wh-mono">' + esc(r.startDate) + ' → ' + esc(r.endDate) + '</td>' +
+      '<td>' + esc(r.destination) + '</td><td>' + badge + '</td>' +
+      '<td class="wh-row-actions">' +
+      '<button class="wh-btn wh-btn-primary" style="padding:6px 10px; font-size:12px;" data-fulfill-reservation="' + esc(r.id) + '">' + icon('packageMinus', 14) + ' Consegna</button>' +
+      '<button class="wh-icon-btn wh-icon-danger" data-cancel-reservation="' + esc(r.id) + '">' + icon('x', 14) + '</button>' +
+      '</td></tr>'
+    );
+  }).join('');
+  return '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Prodotto</th><th class="wh-num">Quantità</th><th>Periodo</th><th>Destinazione</th><th>Stato</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
+function fulfillModalHtml() {
+  var r = state.fulfillingReservation;
+  if (!r) return '';
+  return (
+    '<div class="wh-modal-overlay" id="fulfill-modal-overlay"><div class="wh-modal">' +
+    '<div class="wh-modal-head"><h2 class="wh-display-sm">Registra consegna</h2><button class="wh-icon-btn" id="fulfill-close">' + icon('x', 16) + '</button></div>' +
+    '<p class="wh-modal-msg"><span class="wh-strong">' + esc(r.productName) + '</span> — destinazione: <span class="wh-strong">' + esc(r.destination) + '</span>. Correggi la quantità se consegni meno del previsto.</p>' +
+    '<div class="wh-form-grid" style="margin-bottom:16px;">' +
+    '<label class="wh-field"><span>Quantità consegnata</span><input id="fulfill-qty" type="number" min="1" value="' + r.qty + '" /></label>' +
+    '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="fulfill-note" value="' + esc(r.note || '') + '" placeholder="dettagli aggiuntivi…" /></label>' +
+    '</div>' +
+    '<div class="wh-modal-actions"><button type="button" class="wh-btn wh-btn-ghost" id="fulfill-cancel">Annulla</button>' +
+    '<button type="button" class="wh-btn wh-btn-primary" id="fulfill-confirm">' + icon('check', 16) + ' Conferma consegna</button></div>' +
+    '</div></div>'
+  );
+}
+
+function viewReservations() {
+  var db = state.db;
+  var productOptions = db.products.map(function (p) { return '<option value="' + esc(p.id) + '">' + esc(p.sku) + ' — ' + esc(p.name) + '</option>'; }).join('');
+  var today = todayStr();
+
+  return (
+    '<div class="wh-view">' +
+    viewHeader('Pianificazione', 'Prenotazioni', 'Blocca la disponibilità di uno o più articoli per un periodo futuro. Il prestito e il reso veri li registri comunque a mano quando arriva il momento.') +
+    '<div class="wh-movement-card">' +
+    '<p class="wh-eyebrow" style="margin-bottom:10px;">Periodo e destinazione</p>' +
+    '<div class="wh-form-grid" style="margin-bottom:18px;">' +
+    '<label class="wh-field"><span>Dal</span><input id="rs-start" type="date" value="' + today + '" /></label>' +
+    '<label class="wh-field"><span>Al</span><input id="rs-end" type="date" value="' + today + '" /></label>' +
+    '<label class="wh-field wh-field-wide"><span>Destinazione (obbligatoria)</span><input id="rs-destination" placeholder="es. evento del 20/09, nome cliente…" /></label>' +
+    '<label class="wh-field wh-field-wide"><span>Nota (opzionale)</span><input id="rs-note" placeholder="dettagli aggiuntivi…" /></label>' +
+    '</div>' +
+
+    '<p class="wh-eyebrow" style="margin-bottom:10px;">Aggiungi articolo</p>' +
+    '<div class="wh-form-grid">' +
+    '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="rs-product">' + productOptions + '</select></label>' +
+    '<label class="wh-field"><span>Quantità</span><input id="rs-qty" type="number" min="1" placeholder="0" /></label>' +
+    '<div style="align-self:end;"><button type="button" id="rs-add-line" class="wh-btn wh-btn-ghost" style="width:100%; justify-content:center;">' + icon('plus', 16) + ' Aggiungi alla lista</button></div>' +
+    '</div>' +
+    '<div class="wh-stock-hint" id="rs-availability-hint"></div>' +
+
+    '<p class="wh-eyebrow" style="margin:20px 0 10px;">Lista articoli da prenotare</p>' +
+    '<div id="rs-cart-wrap">' + reservationCartLinesHtml() + '</div>' +
+
+    '<div id="rs-errors">' + reservationErrorsHtml() + '</div>' +
+    '<button type="button" id="rs-submit" class="wh-btn wh-btn-primary wh-submit-move stamp-mid" style="margin-top:16px;">' + icon('calendar', 16) + ' Conferma prenotazione</button>' +
+    '</div>' +
+
+    '<p class="wh-eyebrow" style="margin:28px 0 10px;">Prenotazioni esistenti</p>' +
+    existingReservationsHtml() +
+    '</div>' + fulfillModalHtml()
+  );
+}
+
+function reservationErrorsHtml() {
+  if (!state.lastMovementErrors.length) return '';
+  var items = state.lastMovementErrors.map(function (e) { return '<li>' + esc(e) + '</li>'; }).join('');
+  return '<div class="wh-login-error" style="align-items:flex-start; margin-top:16px;">' + icon('warning', 15) +
+    '<div><strong>Prenotazione NON salvata:</strong><ul style="margin:6px 0 0; padding-left:18px;">' + items + '</ul></div></div>';
+}
+
+/* ------------------------------------------------------------------
+   TEMPLATE: STORICO
+------------------------------------------------------------------- */
 function viewHistory() {
   var db = state.db;
   var rows = db.movements.filter(function (m) {
-    if (state.historyFilterType !== 'tutti' && m.type !== state.historyFilterType) return false;
-    if (state.historyFilterWarehouse !== 'tutti' && m.from !== state.historyFilterWarehouse && m.to !== state.historyFilterWarehouse) return false;
-    return true;
+    return state.historyFilterType === 'tutti' || m.type === state.historyFilterType;
   });
-  function whName(id) { var w = db.warehouses.find(function (w) { return w.id === id; }); return w ? w.name : '—'; }
 
   var body = rows.map(function (m) {
     var meta = MOVE_TYPES[m.type] || { label: m.type, cls: '' };
     return (
       '<tr><td><span class="stamp ' + meta.cls + '">' + esc(meta.label) + '</span></td>' +
       '<td><div class="wh-strong">' + esc(m.productName) + '</div><div class="wh-mono wh-dim">' + esc(m.productSku) + '</div></td>' +
-      '<td>' + (m.from ? esc(whName(m.from)) : '—') + ' → ' + (m.to ? esc(whName(m.to)) : '—') + '</td>' +
       '<td class="wh-num wh-strong">' + m.qty + '</td>' +
       '<td>' + esc(m.destination || '—') + '</td>' +
       '<td class="wh-dim">' + esc(m.note || '—') + '</td>' +
@@ -817,22 +911,20 @@ function viewHistory() {
       '<td class="wh-dim">' + fmtDate(m.ts) + '</td></tr>'
     );
   }).join('');
-  if (!rows.length) body = '<tr><td colspan="8" class="wh-empty">Nessun movimento registrato.</td></tr>';
+  if (!rows.length) body = '<tr><td colspan="7" class="wh-empty">Nessun movimento registrato.</td></tr>';
 
-  var typeOptions = ['tutti', 'carico', 'scarico', 'trasferimento'].map(function (t) {
-    var label = t === 'tutti' ? 'Tutti i tipi' : (t === 'carico' ? 'Solo resi' : (t === 'scarico' ? 'Solo prestiti/prelievi' : 'Solo trasferimenti'));
+  var typeOptions = ['tutti', 'carico', 'scarico'].map(function (t) {
+    var label = t === 'tutti' ? 'Tutti i tipi' : (t === 'carico' ? 'Solo resi' : 'Solo prestiti/prelievi');
     return '<option value="' + t + '" ' + (state.historyFilterType === t ? 'selected' : '') + '>' + label + '</option>';
   }).join('');
-  var whOptions = '<option value="tutti" ' + (state.historyFilterWarehouse === 'tutti' ? 'selected' : '') + '>Tutti i magazzini</option>' +
-    db.warehouses.map(function (w) { return '<option value="' + esc(w.id) + '" ' + (state.historyFilterWarehouse === w.id ? 'selected' : '') + '>' + esc(w.name) + '</option>'; }).join('');
 
   return (
     '<div>' +
     openLoansHtml() +
     '<div class="wh-view">' +
     viewHeader('Registro', 'Storico movimenti', 'Tutte le operazioni registrate, con utente e data.') +
-    '<div class="wh-filters"><select id="hist-filter-type">' + typeOptions + '</select><select id="hist-filter-wh">' + whOptions + '</select></div>' +
-    '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Tipo</th><th>Prodotto</th><th>Da → A</th><th class="wh-num">Quantità</th><th>Destinazione</th><th>Nota</th><th>Utente</th><th>Data</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
+    '<div class="wh-filters"><select id="hist-filter-type">' + typeOptions + '</select></div>' +
+    '<div class="wh-table-wrap"><table class="wh-table"><thead><tr><th>Tipo</th><th>Prodotto</th><th class="wh-num">Quantità</th><th>Destinazione</th><th>Nota</th><th>Utente</th><th>Data</th></tr></thead><tbody>' + body + '</tbody></table></div>' +
     '</div>' +
     returnModalHtml() +
     '</div>'
@@ -862,8 +954,12 @@ function render() {
     content = viewDashboard();
   } else if (state.view === 'products') {
     content = viewProducts();
-  } else if (state.view === 'movement') {
-    content = viewMovement();
+  } else if (state.view === 'loan') {
+    content = viewMovementPage('scarico');
+  } else if (state.view === 'return') {
+    content = viewMovementPage('carico');
+  } else if (state.view === 'reservations') {
+    content = viewReservations();
   } else {
     content = viewHistory();
   }
@@ -889,38 +985,38 @@ function attachLoginHandlers() {
 }
 
 function attachAppHandlers() {
-  // Navigazione
   document.querySelectorAll('[data-nav]').forEach(function (btn) {
-    btn.addEventListener('click', function () { state.view = btn.getAttribute('data-nav'); render(); });
+    btn.addEventListener('click', function () {
+      state.view = btn.getAttribute('data-nav');
+      state.movementCart = [];
+      state.lastMovementErrors = [];
+      render();
+    });
   });
   var logoutBtn = document.getElementById('btn-logout');
   if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
 
   if (state.view === 'dashboard') attachDashboardHandlers();
   if (state.view === 'products') attachProductsHandlers();
-  if (state.view === 'movement') attachMovementHandlers();
+  if (state.view === 'loan' || state.view === 'return') attachMovementHandlers();
+  if (state.view === 'reservations') attachReservationsHandlers();
   if (state.view === 'history') attachHistoryHandlers();
 }
 
 function attachDashboardHandlers() {
   var search = document.getElementById('dash-search');
-  if (search) {
-    search.addEventListener('input', function () {
-      state.dashQuery = search.value;
-      document.getElementById('dash-table-wrap').innerHTML = dashboardTableHtml();
-    });
-  }
+  var tagSel = document.getElementById('dash-tag-filter');
+  function refresh() { document.getElementById('dash-table-wrap').innerHTML = dashboardTableHtml(); }
+  if (search) search.addEventListener('input', function () { state.dashQuery = search.value; refresh(); });
+  if (tagSel) tagSel.addEventListener('change', function () { state.dashTagFilter = tagSel.value; refresh(); });
 }
 
 function attachProductsHandlers() {
   var search = document.getElementById('prod-search');
-  if (search) {
-    search.addEventListener('input', function () {
-      state.prodQuery = search.value;
-      document.getElementById('prod-table-wrap').innerHTML = productsTableHtml();
-      attachProductRowHandlers();
-    });
-  }
+  var tagSel = document.getElementById('prod-tag-filter');
+  function refresh() { document.getElementById('prod-table-wrap').innerHTML = productsTableHtml(); attachProductRowHandlers(); }
+  if (search) search.addEventListener('input', function () { state.prodQuery = search.value; refresh(); });
+  if (tagSel) tagSel.addEventListener('change', function () { state.prodTagFilter = tagSel.value; refresh(); });
   attachProductRowHandlers();
 
   var newBtn = document.getElementById('btn-new-product');
@@ -958,6 +1054,8 @@ function attachProductModalHandlers() {
     var sku = document.getElementById('pm-sku').value.trim();
     var name = document.getElementById('pm-name').value.trim();
     var category = document.getElementById('pm-category').value.trim();
+    var warehouseTag = document.getElementById('pm-warehousetag').value.trim();
+    var qty = Number(document.getElementById('pm-qty').value) || 0;
     var price = Number(document.getElementById('pm-price').value) || 0;
     var minStock = Number(document.getElementById('pm-minstock').value) || 0;
     var totalOwned = Number(document.getElementById('pm-totalowned').value) || 0;
@@ -966,12 +1064,8 @@ function attachProductModalHandlers() {
       return;
     }
     var id = saveBtn.getAttribute('data-id') || uid();
-    var stockOverrides = {};
-    document.querySelectorAll('.pm-stock').forEach(function (input) {
-      stockOverrides[input.getAttribute('data-warehouse')] = Number(input.value) || 0;
-    });
     state.editingProduct = null;
-    upsertProduct({ id: id, sku: sku, name: name, category: category, price: price, minStock: minStock, totalOwned: totalOwned }, stockOverrides);
+    upsertProduct({ id: id, sku: sku, name: name, category: category, warehouseTag: warehouseTag, qty: qty, price: price, minStock: minStock, totalOwned: totalOwned });
     render();
   });
 }
@@ -991,35 +1085,7 @@ function attachConfirmModalHandlers() {
 }
 
 function attachMovementHandlers() {
-  document.querySelectorAll('[data-move-type]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      state.movementType = btn.getAttribute('data-move-type');
-      state.movementCart = [];
-      render();
-    });
-  });
-
-  var type = state.movementType;
-
-  function currentReferenceWarehouseId() {
-    if (type === 'trasferimento') {
-      var fromSel = document.getElementById('mv-from');
-      return fromSel ? fromSel.value : null;
-    }
-    var whSel = document.getElementById('mv-warehouse');
-    return whSel ? whSel.value : null;
-  }
-
-  function refreshProductOptions() {
-    var wrap = document.getElementById('mv-product-wrap');
-    var whId = currentReferenceWarehouseId();
-    if (wrap) {
-      wrap.innerHTML = '<label class="wh-field wh-field-wide"><span>Prodotto</span><select id="mv-product">' + productOptionsHtml(type, whId) + '</select></label>';
-      var newSel = document.getElementById('mv-product');
-      if (newSel) newSel.addEventListener('change', refreshHint);
-    }
-    refreshHint();
-  }
+  var type = state.view === 'loan' ? 'scarico' : 'carico';
 
   function refreshHint() {
     var hintEl = document.getElementById('mv-stock-hint');
@@ -1027,15 +1093,9 @@ function attachMovementHandlers() {
     if (hintEl && sel && sel.value) hintEl.innerHTML = stockHintHtml(sel.value);
     else if (hintEl) hintEl.innerHTML = '';
   }
-
   var productSel = document.getElementById('mv-product');
   if (productSel) productSel.addEventListener('change', refreshHint);
-  refreshHint(); // popola il suggerimento al primo caricamento
-
-  var whSelector = document.getElementById('mv-warehouse');
-  if (whSelector) whSelector.addEventListener('change', refreshProductOptions);
-  var fromSelector = document.getElementById('mv-from');
-  if (fromSelector) fromSelector.addEventListener('change', refreshProductOptions);
+  refreshHint();
 
   var addBtn = document.getElementById('mv-add-line');
   if (addBtn) addBtn.addEventListener('click', function () {
@@ -1057,10 +1117,6 @@ function attachMovementHandlers() {
 
   var submitBtn = document.getElementById('mv-submit');
   if (submitBtn) submitBtn.addEventListener('click', function () {
-    var type = state.movementType;
-    var endpoints = {};
-    if (type !== 'trasferimento') endpoints.warehouseId = document.getElementById('mv-warehouse').value;
-    else { endpoints.fromId = document.getElementById('mv-from').value; endpoints.toId = document.getElementById('mv-to').value; }
     var note = document.getElementById('mv-note').value.trim();
     var destination = '';
     if (type === 'scarico') {
@@ -1069,7 +1125,6 @@ function attachMovementHandlers() {
     }
 
     var lines = state.movementCart.slice();
-    // Se la lista è vuota, usa i campi correnti come unica riga
     if (!lines.length) {
       var productId = document.getElementById('mv-product').value;
       var qty = Number(document.getElementById('mv-qty').value);
@@ -1078,8 +1133,9 @@ function attachMovementHandlers() {
     }
 
     submitBtn.disabled = true;
-    submitMovementBatch(lines, type, endpoints, note, destination).then(function () {
+    submitMovementBatch(lines, type, note, destination).then(function (errors) {
       state.movementCart = [];
+      state.lastMovementErrors = errors || [];
       submitBtn.disabled = false;
       render();
     });
@@ -1091,17 +1147,125 @@ function attachCartLineHandlers() {
     btn.addEventListener('click', function () {
       var i = Number(btn.getAttribute('data-remove-cart-line'));
       state.movementCart.splice(i, 1);
-      document.getElementById('mv-cart-wrap').innerHTML = cartLinesHtml();
+      var wrap = document.getElementById('mv-cart-wrap') || document.getElementById('rs-cart-wrap');
+      if (wrap) wrap.innerHTML = (state.view === 'reservations') ? reservationCartLinesHtml() : cartLinesHtml();
       attachCartLineHandlers();
+    });
+  });
+}
+
+function attachReservationsHandlers() {
+  function currentDates() {
+    var s = document.getElementById('rs-start').value;
+    var e = document.getElementById('rs-end').value;
+    return { start: s, end: e };
+  }
+
+  function refreshAvailabilityHint() {
+    var hintEl = document.getElementById('rs-availability-hint');
+    var sel = document.getElementById('rs-product');
+    if (!hintEl || !sel || !sel.value) { if (hintEl) hintEl.innerHTML = ''; return; }
+    var d = currentDates();
+    if (!d.start || !d.end) { hintEl.innerHTML = ''; return; }
+    var available = computeAvailability(sel.value, d.start, d.end);
+    hintEl.innerHTML = '<span>Disponibili in quel periodo: <span class="wh-mono wh-strong">' + available + '</span></span>';
+  }
+
+  var productSel = document.getElementById('rs-product');
+  if (productSel) productSel.addEventListener('change', refreshAvailabilityHint);
+  var startInput = document.getElementById('rs-start');
+  var endInput = document.getElementById('rs-end');
+  if (startInput) startInput.addEventListener('change', refreshAvailabilityHint);
+  if (endInput) endInput.addEventListener('change', refreshAvailabilityHint);
+  refreshAvailabilityHint();
+
+  var addBtn = document.getElementById('rs-add-line');
+  if (addBtn) addBtn.addEventListener('click', function () {
+    var productId = document.getElementById('rs-product').value;
+    var qtyInput = document.getElementById('rs-qty');
+    var qty = Number(qtyInput.value);
+    if (!productId || !qty || qty <= 0) { showToast('Seleziona un prodotto e inserisci una quantità valida', 'error'); return; }
+    var product = state.db.products.find(function (p) { return p.id === productId; });
+    var existing = state.movementCart.find(function (l) { return l.productId === productId; });
+    if (existing) existing.qty += qty;
+    else state.movementCart.push({ productId: productId, productName: product.name, qty: qty });
+    qtyInput.value = '';
+    document.getElementById('rs-cart-wrap').innerHTML = reservationCartLinesHtml();
+    attachCartLineHandlers();
+    showToast(product.name + ' aggiunto alla lista');
+  });
+
+  attachCartLineHandlers();
+
+  document.querySelectorAll('[data-cancel-reservation]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      cancelReservation(btn.getAttribute('data-cancel-reservation'));
+    });
+  });
+
+  document.querySelectorAll('[data-fulfill-reservation]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var id = btn.getAttribute('data-fulfill-reservation');
+      var r = state.db.reservations.find(function (x) { return x.id === id; });
+      if (!r) return;
+      state.fulfillingReservation = { id: r.id, productId: r.productId, productName: r.productName, qty: r.qty, destination: r.destination, note: r.note };
+      render();
+    });
+  });
+
+  if (state.fulfillingReservation) attachFulfillModalHandlers();
+
+  var submitBtn = document.getElementById('rs-submit');
+  if (submitBtn) submitBtn.addEventListener('click', function () {
+    var d = currentDates();
+    var destination = document.getElementById('rs-destination').value.trim();
+    var note = document.getElementById('rs-note').value.trim();
+
+    if (!d.start || !d.end) { showToast('Inserisci le date di inizio e fine', 'error'); return; }
+    if (d.end < d.start) { showToast('La data di fine non può essere prima della data di inizio', 'error'); return; }
+    if (!destination) { showToast('La destinazione è obbligatoria', 'error'); return; }
+
+    var lines = state.movementCart.slice();
+    if (!lines.length) {
+      var productId = document.getElementById('rs-product').value;
+      var qty = Number(document.getElementById('rs-qty').value);
+      if (!productId || !qty || qty <= 0) { showToast('Aggiungi almeno un articolo o inserisci una quantità valida', 'error'); return; }
+      lines = [{ productId: productId, qty: qty }];
+    }
+
+    submitBtn.disabled = true;
+    submitReservationBatch(lines, d.start, d.end, destination, note).then(function (errors) {
+      submitBtn.disabled = false;
+      state.lastMovementErrors = errors || [];
+      if (!errors || !errors.length) state.movementCart = [];
+      render();
+    });
+  });
+}
+
+function attachFulfillModalHandlers() {
+  var closeEls = [document.getElementById('fulfill-close'), document.getElementById('fulfill-cancel')];
+  closeEls.forEach(function (el) { if (el) el.addEventListener('click', function () { state.fulfillingReservation = null; render(); }); });
+  var overlay = document.getElementById('fulfill-modal-overlay');
+  if (overlay) overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) { state.fulfillingReservation = null; render(); } });
+
+  var confirmBtn = document.getElementById('fulfill-confirm');
+  if (confirmBtn) confirmBtn.addEventListener('click', function () {
+    var r = state.fulfillingReservation;
+    var qty = Number(document.getElementById('fulfill-qty').value);
+    var note = document.getElementById('fulfill-note').value.trim();
+    if (!qty || qty <= 0) { showToast('Inserisci una quantità valida', 'error'); return; }
+    confirmBtn.disabled = true;
+    fulfillReservation(r, qty, note).then(function () {
+      state.fulfillingReservation = null;
+      render();
     });
   });
 }
 
 function attachHistoryHandlers() {
   var typeSel = document.getElementById('hist-filter-type');
-  var whSel = document.getElementById('hist-filter-wh');
   if (typeSel) typeSel.addEventListener('change', function () { state.historyFilterType = typeSel.value; render(); });
-  if (whSel) whSel.addEventListener('change', function () { state.historyFilterWarehouse = whSel.value; render(); });
 
   document.querySelectorAll('[data-return-loan]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -1110,7 +1274,6 @@ function attachHistoryHandlers() {
       if (!loan) return;
       state.returningLoan = {
         destination: loan.destination,
-        warehouseId: loan.warehouseId,
         items: loan.items.map(function (it) { return { productId: it.productId, name: it.name, qty: it.outstanding }; }),
       };
       render();
@@ -1147,7 +1310,7 @@ function attachReturnModalHandlers() {
     var lines = loan.items.filter(function (it) { return it.qty > 0; }).map(function (it) { return { productId: it.productId, qty: it.qty }; });
     if (!lines.length) { showToast('Inserisci almeno una quantità da restituire', 'error'); return; }
     confirmBtn.disabled = true;
-    submitMovementBatch(lines, 'carico', { warehouseId: loan.warehouseId }, conditionNote, loan.destination).then(function () {
+    submitMovementBatch(lines, 'carico', conditionNote, loan.destination).then(function () {
       state.returningLoan = null;
       render();
     });
